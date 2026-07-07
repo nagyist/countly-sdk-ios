@@ -6,6 +6,8 @@
 
 @property(nonatomic) BOOL webViewClosed;
 @property(nonatomic) BOOL hasAppeared;
+@property(nonatomic) NSInteger resourceRetryCount;
+@property(nonatomic) BOOL retryInProgress;
 @property(nonatomic, strong) NSTimer *loadTimeoutTimer;
 @property(nonatomic, strong) NSDate *loadStartDate;
 @property(nonatomic, copy) void (^dismissBlock)(void);
@@ -16,6 +18,7 @@
 - (void)notifyPageLoaded;
 - (void)loadDidTimeout;
 - (void)closeWebView;
+- (void)retryOrCloseWebViewForReason:(NSString *)reason;
 
 @end
 #endif

@@ -10,6 +10,16 @@
 #import "PassThroughBackgroundView.h"
 
 #if (TARGET_OS_IOS)
+// Critical-resource load retries: how many times to reload the web view before
+// giving up when a critical (JS/CSS) resource fails to load. A single transient
+// network hiccup — e.g. a connection stalled under a burst of parallel asset
+// requests against an HTTP/1.1 / rate-limited edge — should not tear down otherwise
+// valid content. On reload, already-loaded resources are served from the in-session
+// cache, so the retry re-fetches only what failed. Mirrors the more tolerant Android
+// behavior (which never closes on a transient JS error event).
+static const NSInteger kCLYMaxResourceRetries = 2;
+static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
+
 // TODO: improve logging, check edge cases
 @interface CountlyWebViewManager ()
 
@@ -20,6 +30,8 @@
 @property(nonatomic, strong) NSDate *loadStartDate;
 @property(nonatomic) BOOL hasAppeared;
 @property(nonatomic) BOOL webViewClosed;
+@property(nonatomic) NSInteger resourceRetryCount;
+@property(nonatomic) BOOL retryInProgress;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -310,7 +322,9 @@
 }
 
 - (void)notifyPageLoaded {
-    if (self.webViewClosed || self.hasAppeared) return;
+    // Suppress appearance while a retry reload is pending, so the failing load
+    // never flashes broken content before the reload replaces it.
+    if (self.webViewClosed || self.hasAppeared || self.retryInProgress) return;
 
     [self.loadTimeoutTimer invalidate];
     self.loadTimeoutTimer = nil;
@@ -323,6 +337,58 @@
     }
 }
 
+// A critical (JS/CSS) resource failed to load. Rather than closing the content
+// immediately, reload the web view up to kCLYMaxResourceRetries times before giving
+// up. This turns a transient network hiccup (e.g. a connection stalled under a burst
+// of parallel asset requests against a rate-limited / HTTP-1.1 edge) into a recoverable
+// event instead of a dismissed content. Multiple failures from the same load are
+// coalesced into a single reload. Must be called on the main thread.
+- (void)retryOrCloseWebViewForReason:(NSString *)reason {
+    if (self.webViewClosed) return;
+
+    // Once the content is visible, a late resource failure must not reload or tear it
+    // down: the injected error listener / PerformanceObserver stay active for the whole
+    // page life, so a dynamically-loaded or lazy resource failing after appearance would
+    // otherwise re-run the page (flashing it, discarding scroll / in-progress survey
+    // input, and re-firing on-load analytics) or dismiss content the user is using. The
+    // retry mechanism only recovers failures during the initial load.
+    if (self.hasAppeared) {
+        CLY_LOG_I(@"%s %@ — content already visible, treating as non-fatal.", __FUNCTION__, reason);
+        return;
+    }
+
+    // A reload is already scheduled for this load cycle — coalesce further failures.
+    if (self.retryInProgress) {
+        CLY_LOG_I(@"%s %@ — retry already scheduled, ignoring.", __FUNCTION__, reason);
+        return;
+    }
+
+    if (self.resourceRetryCount >= kCLYMaxResourceRetries) {
+        CLY_LOG_I(@"%s %@ — retries exhausted (%ld/%ld). Closing web view.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries);
+        [self closeWebView];
+        return;
+    }
+
+    self.resourceRetryCount += 1;
+    self.retryInProgress = YES;
+    NSTimeInterval delay = kCLYResourceRetryBaseDelay * self.resourceRetryCount;
+    CLY_LOG_I(@"%s %@ — retrying load (%ld/%ld) in %.1fs.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries, delay);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.webViewClosed) return;
+        strongSelf.retryInProgress = NO;
+        WKWebView *webView = strongSelf.backgroundView.webView;
+        if (!webView) {
+            [strongSelf closeWebView];
+            return;
+        }
+        CLY_LOG_I(@"%s Reloading web view (retry %ld/%ld).", __FUNCTION__, (long)strongSelf.resourceRetryCount, (long)kCLYMaxResourceRetries);
+        [webView reload];
+    });
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message
 {
@@ -333,10 +399,11 @@
         NSString *tag = body[@"tag"];
         NSString *url = body[@"url"];
 
-        CLY_LOG_I(@"%s Critical resource (%@) failed to load: [%@]. Closing web view.", __FUNCTION__, tag, url);
+        CLY_LOG_I(@"%s Critical resource (%@) failed to load: [%@].", __FUNCTION__, tag, url);
 
+        NSString *reason = [NSString stringWithFormat:@"Critical resource (%@) failed to load: [%@]", tag, url];
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self closeWebView];
+            [self retryOrCloseWebViewForReason:reason];
         });
     }
     else if ([message.name isEqualToString:@"resourceVerifyResult"]) {
@@ -347,8 +414,17 @@
             for (NSDictionary *entry in results) {
                 NSInteger status = [entry[@"status"] integerValue];
                 if (status >= 400) {
-                    CLY_LOG_I(@"%s Critical resource (%@) returned HTTP %ld: [%@]. Closing web view.",
+                    CLY_LOG_I(@"%s Critical resource (%@) returned HTTP %ld: [%@].",
                               __FUNCTION__, entry[@"tag"], (long)status, entry[@"url"]);
+                    // This is the post-load HEAD verification (runs on didFinishNavigation):
+                    // the page has already finished loading and run its on-load JS, so a
+                    // reload from here would re-fire any analytics it recorded. Do NOT retry
+                    // from this path. Retries are driven only by the during-load
+                    // resourceLoadError path. Defer to an in-flight retry if one is already
+                    // scheduled, never tear down already-visible content, otherwise close.
+                    if (self.hasAppeared || self.retryInProgress) {
+                        return;
+                    }
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [self closeWebView];
                     });
