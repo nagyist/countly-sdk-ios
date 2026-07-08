@@ -8,6 +8,7 @@
 #import "CountlyOverlayWindow.h"
 #import "CountlyWebViewController.h"
 #import "PassThroughBackgroundView.h"
+#import "CountlyContentBuilderInternal.h"
 
 #if (TARGET_OS_IOS)
 // Critical-resource load retries: how many times to reload the web view before
@@ -19,6 +20,16 @@
 // behavior (which never closes on a transient JS error event).
 static const NSInteger kCLYMaxResourceRetries = 2;
 static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
+// Fallback stall timeout (seconds) used only when reload-on-stall is enabled but no
+// timeout was configured (e.g. the SDK was not started via config in a unit test). The
+// real value comes from CountlyContentConfig setContentReloadOnStallTimeout: (default
+// 1000 ms). Kept short because a manual reload is observed to recover reliably: on reload
+// the already-fetched assets come from cache and the rest reuse the warm connection, so
+// the parallel-connection burst shrinks below the edge's limit. A stalled load fires no
+// JS 'error' event, so this timer is what triggers the reload for that case. When the
+// flag is off, the 60s safety-net timeout is used and the view closes on failure.
+static const NSTimeInterval kCLYLoadStallTimeout = 1.0;
+static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 
 // TODO: improve logging, check edge cases
 @interface CountlyWebViewManager ()
@@ -263,7 +274,12 @@ static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
     CLY_LOG_I(@"%s Web view has started loading", __FUNCTION__);
     [self.loadTimeoutTimer invalidate];
     __weak typeof(self) weakSelf = self;
-    self.loadTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+    // Fast stall-detect (reload) when enabled, using the configurable stall timeout;
+    // otherwise a plain 60s safety-net close.
+    NSTimeInterval stall = CountlyContentBuilderInternal.sharedInstance.contentReloadOnStallTimeout;
+    if (stall <= 0) stall = kCLYLoadStallTimeout; // fallback default (e.g. SDK not started via config)
+    NSTimeInterval timeout = CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall ? stall : kCLYDefaultLoadTimeout;
+    self.loadTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:timeout repeats:NO block:^(NSTimer * _Nonnull timer) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         [strongSelf loadDidTimeout];
@@ -354,6 +370,13 @@ static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
     // retry mechanism only recovers failures during the initial load.
     if (self.hasAppeared) {
         CLY_LOG_I(@"%s %@ — content already visible, treating as non-fatal.", __FUNCTION__, reason);
+        return;
+    }
+
+    // Reload-on-failure is opt-in. When disabled, keep the original behavior: close on failure.
+    if (!CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall) {
+        CLY_LOG_I(@"%s %@ — reload-on-stall disabled, closing web view.", __FUNCTION__, reason);
+        [self closeWebView];
         return;
     }
 
@@ -677,9 +700,12 @@ static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
 
 - (void)loadDidTimeout {
     if (self.hasAppeared || self.webViewClosed) return;
-    self.webViewClosed = YES;
-    CLY_LOG_I(@"%s Web view load timed out after 60s, closing", __FUNCTION__);
-    [self closeWebView];
+    CLY_LOG_I(@"%s Web view load stalled after %.0fs.", __FUNCTION__, kCLYLoadStallTimeout);
+    // A stalled load fires no JS 'error' event, so it never reaches the resource-error
+    // retry path. Route it through the same retry here: reload (observed to recover)
+    // up to the retry cap, then close. Do NOT set webViewClosed first — that would make
+    // retryOrCloseWebViewForReason: bail out before it can retry.
+    [self retryOrCloseWebViewForReason:@"load stalled (no appearance)"];
 }
   #endif
 @end

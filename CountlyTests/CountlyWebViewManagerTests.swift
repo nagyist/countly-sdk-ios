@@ -19,10 +19,13 @@ class CountlyWebViewManagerTests: XCTestCase {
     override func setUp() {
         super.setUp()
         manager = CountlyWebViewManager()
+        // Retry-on-failure is opt-in; enable it so the retry-path tests exercise it.
+        CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = true
     }
 
     override func tearDown() {
         manager = nil
+        CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
         super.tearDown()
     }
 
@@ -131,13 +134,33 @@ class CountlyWebViewManagerTests: XCTestCase {
 
     // MARK: - loadDidTimeout tests
 
-    func testLoadDidTimeout_setsWebViewClosedFlag() {
+    func testLoadDidTimeout_schedulesRetry() {
         manager.webViewClosed = false
         manager.hasAppeared = false
 
         manager.loadDidTimeout()
 
-        // loadDidTimeout sets webViewClosed = YES synchronously before calling closeWebView
+        // A stalled load now triggers a retry (reload) instead of an immediate close.
+        XCTAssertFalse(manager.webViewClosed)
+        XCTAssertEqual(manager.resourceRetryCount, 1)
+        XCTAssertTrue(manager.retryInProgress)
+    }
+
+    func testLoadDidTimeout_closesAfterRetriesExhausted() {
+        manager.webViewClosed = false
+        manager.hasAppeared = false
+        manager.resourceRetryCount = 99  // retries already used up
+
+        let bgView = PassThroughBackgroundView(frame: .zero)
+        bgView.webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        manager.backgroundView = bgView
+
+        let dismissExpectation = expectation(description: "Dismiss block called")
+        manager.dismissBlock = { dismissExpectation.fulfill() }
+
+        manager.loadDidTimeout()
+
+        waitForExpectations(timeout: 3.0)
         XCTAssertTrue(manager.webViewClosed)
     }
 
@@ -376,6 +399,38 @@ class CountlyWebViewManagerTests: XCTestCase {
         XCTAssertFalse(dismissCalled)
         XCTAssertEqual(manager.resourceRetryCount, 1)
         XCTAssertTrue(manager.retryInProgress)
+
+        contentController.removeScriptMessageHandler(forName: "resourceLoadError")
+        contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")
+    }
+
+    func testDidReceiveScriptMessage_resourceLoadError_closesWhenReloadDisabled() {
+        // With enableContentReloadOnStall off, a critical-resource failure closes (original behavior).
+        CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
+        manager.webViewClosed = false
+        manager.hasAppeared = false
+
+        let config = WKWebViewConfiguration()
+        let contentController = config.userContentController
+        contentController.add(manager, name: "resourceLoadError")
+        contentController.add(manager, name: "resourceVerifyResult")
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let bgView = PassThroughBackgroundView(frame: .zero)
+        bgView.webView = webView
+        manager.backgroundView = bgView
+
+        let dismissExpectation = expectation(description: "Dismiss block called")
+        manager.dismissBlock = { dismissExpectation.fulfill() }
+
+        let js = """
+        window.webkit.messageHandlers.resourceLoadError.postMessage({tag: "SCRIPT", url: "https://example.com/broken.js"});
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+
+        waitForExpectations(timeout: 3.0)
+        XCTAssertTrue(manager.webViewClosed)
+        XCTAssertEqual(manager.resourceRetryCount, 0)  // did not retry
 
         contentController.removeScriptMessageHandler(forName: "resourceLoadError")
         contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")

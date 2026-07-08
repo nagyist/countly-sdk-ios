@@ -59,6 +59,26 @@ typedef void (^ContentCallback)(ContentStatus contentStatus, NSDictionary<NSStri
 - (void) setWebviewDisplayOption:(WebViewDisplayOption) webViewDisplayOption;
 
 - (WebViewDisplayOption)getWebViewDisplayOption;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
+ * Enables reloading the content web view when a load stalls (does not appear within ~1
+ * second) instead of closing it. A reload reuses the already-warm connection and cached
+ * assets, which recovers loads that fail because a server/edge drops the initial burst of
+ * parallel resource connections. This is a one-way switch: once enabled it stays enabled.
+ * Disabled by default.
+ */
+- (void)enableContentReloadOnStall;
+- (BOOL)getEnableContentReloadOnStall;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
+ * Sets how long a content load may stall (not appear) before the SDK reloads it, in
+ * milliseconds. Only used when reload-on-stall is enabled (see enableContentReloadOnStall).
+ * Default is 1000 (1 second). Can be changed at any time before starting the SDK.
+ */
+- (void)setContentReloadOnStallTimeout:(NSUInteger)milliseconds;
+- (NSUInteger)getContentReloadOnStallTimeout;
 #endif
 
 NS_ASSUME_NONNULL_END
