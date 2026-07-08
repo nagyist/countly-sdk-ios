@@ -20,6 +20,9 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
 
     override func tearDown() {
         CountlyContentBuilderInternal.sharedInstance().exitContentZone()
+        // Reset reload-on-stall state so it can't leak into later tests.
+        CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
+        CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout = 0
         Countly.sharedInstance().halt(true)
         MockURLProtocol.requestHandler = nil
         super.tearDown()
@@ -286,6 +289,39 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         CountlyContentBuilderInternal.sharedInstance().enterContentZone([])
 
         wait(for: [fetchAfterExit], timeout: 15)
+    }
+
+    /**
+     * <pre>
+     * Content reload-on-stall configuration plumbs through to the internal builder.
+     *
+     * 1- A fresh CountlyContentConfig defaults the stall timeout to 1000 ms and reload disabled
+     * 2- enableContentReloadOnStall and setContentReloadOnStallTimeout: round-trip on the config
+     * 3- After start, the internal builder reflects the enabled flag and the timeout
+     *    converted from milliseconds to seconds (2500 ms -> 2.5 s)
+     * </pre>
+     */
+    func test_contentReloadOnStall_configDefaultsAndPlumbing() {
+        // 1- Fresh config object: default 1000 ms, reload disabled.
+        let freshContent = CountlyContentConfig()
+        XCTAssertEqual(freshContent.getContentReloadOnStallTimeout(), 1000)
+        XCTAssertFalse(freshContent.getEnableContentReloadOnStall())
+
+        // 2- Round-trip on the config used for start.
+        let config = createContentTestConfig()
+        config.content().setContentReloadOnStallTimeout(2500)
+        config.content().enableContentReloadOnStall()
+        XCTAssertEqual(config.content().getContentReloadOnStallTimeout(), 2500)
+        XCTAssertTrue(config.content().getEnableContentReloadOnStall())
+
+        // 3- Plumbed to the internal builder on start, converted ms -> seconds.
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall)
+        XCTAssertEqual(CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout, 2.5, accuracy: 0.0001)
     }
 }
 #endif

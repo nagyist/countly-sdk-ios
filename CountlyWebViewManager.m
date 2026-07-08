@@ -43,6 +43,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 @property(nonatomic) BOOL webViewClosed;
 @property(nonatomic) NSInteger resourceRetryCount;
 @property(nonatomic) BOOL retryInProgress;
+@property(nonatomic) NSTimeInterval loadTimeoutInterval;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -57,6 +58,8 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     self.appearBlock = appearBlock;
     self.hasAppeared = NO;
     self.webViewClosed = NO;
+    self.resourceRetryCount = 0;
+    self.retryInProgress = NO;
     // TODO: keyWindow deprecation fix
     _window = [CountlyOverlayWindow new];
     CountlyWebViewController *modal = [CountlyWebViewController new];
@@ -279,6 +282,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     NSTimeInterval stall = CountlyContentBuilderInternal.sharedInstance.contentReloadOnStallTimeout;
     if (stall <= 0) stall = kCLYLoadStallTimeout; // fallback default (e.g. SDK not started via config)
     NSTimeInterval timeout = CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall ? stall : kCLYDefaultLoadTimeout;
+    self.loadTimeoutInterval = timeout;
     self.loadTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:timeout repeats:NO block:^(NSTimer * _Nonnull timer) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
@@ -394,6 +398,11 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 
     self.resourceRetryCount += 1;
     self.retryInProgress = YES;
+    // Cancel the in-flight stall timer: we have committed to a reload, and the reload's
+    // own didStartProvisionalNavigation: will arm a fresh one. Leaving the old timer live
+    // risks a spurious loadDidTimeout in the reload-delay window.
+    [self.loadTimeoutTimer invalidate];
+    self.loadTimeoutTimer = nil;
     NSTimeInterval delay = kCLYResourceRetryBaseDelay * self.resourceRetryCount;
     CLY_LOG_I(@"%s %@ — retrying load (%ld/%ld) in %.1fs.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries, delay);
 
@@ -700,7 +709,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 
 - (void)loadDidTimeout {
     if (self.hasAppeared || self.webViewClosed) return;
-    CLY_LOG_I(@"%s Web view load stalled after %.0fs.", __FUNCTION__, kCLYLoadStallTimeout);
+    CLY_LOG_I(@"%s Web view load stalled after %.1fs.", __FUNCTION__, self.loadTimeoutInterval);
     // A stalled load fires no JS 'error' event, so it never reaches the resource-error
     // retry path. Route it through the same retry here: reload (observed to recover)
     // up to the retry cap, then close. Do NOT set webViewClosed first — that would make
