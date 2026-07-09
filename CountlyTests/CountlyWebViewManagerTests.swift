@@ -574,17 +574,20 @@ class CountlyWebViewManagerTests: XCTestCase {
         var dismissCalled = false
         manager.dismissBlock = { dismissCalled = true }
 
-        let js = """
-        window.webkit.messageHandlers.resourceLoadError.postMessage({
-            tag: "SCRIPT",
-            url: "https://example.com/broken.js"
-        });
+        // Deliver the message from a genuinely loaded page: evaluateJavaScript on a web view
+        // that never loaded a document delivers the postMessage only intermittently (no stable
+        // JS context), which made this test flaky. An inline script in loaded HTML is reliable.
+        let html = """
+        <html><body><script>
+        window.webkit.messageHandlers.resourceLoadError.postMessage({tag:"SCRIPT", url:"https://example.com/broken.js"});
+        </script></body></html>
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.loadHTMLString(html, baseURL: URL(string: "https://example.com"))
 
-        let settle = expectation(description: "settle")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle.fulfill() }
-        waitForExpectations(timeout: 2.0)
+        let scheduled = XCTNSPredicateExpectation(predicate: NSPredicate(block: { [weak manager] _, _ in
+            manager?.pendingReloadBlock != nil
+        }), object: nil)
+        wait(for: [scheduled], timeout: 5.0)
 
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertFalse(dismissCalled)
@@ -727,6 +730,52 @@ class CountlyWebViewManagerTests: XCTestCase {
         waitForExpectations(timeout: 2.0)
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertFalse(manager.hasAppeared)
+    }
+
+    func testContentShownDeadlineReached_closesWebView() {
+        // The absolute deadline closes the web view when content_shown never arrived, even if
+        // the view had (blankly) "appeared" - content_shown would otherwise have cancelled it.
+        manager.webViewClosed = false
+        manager.hasAppeared = true
+
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let bgView = PassThroughBackgroundView(frame: .zero)
+        bgView.webView = webView
+        manager.backgroundView = bgView
+
+        let dismissExpectation = expectation(description: "Dismiss block called")
+        manager.dismissBlock = { dismissExpectation.fulfill() }
+
+        manager.contentShownDeadlineReached()
+
+        waitForExpectations(timeout: 3.0)
+        XCTAssertTrue(manager.webViewClosed)
+    }
+
+    func testContentShownEvent_cancelsDeadlineTimer() {
+        // Receiving a [CLY]_content_shown event cancels the absolute deadline, so genuinely
+        // shown content is never torn down by it.
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in }
+        manager.contentShownDeadlineTimer = timer
+
+        let json = "[{\"key\":\"[CLY]_content_shown\",\"segmentation\":{\"content_id\":\"abc\"}}]"
+        manager.recordEvents(withJSONString: json)
+
+        XCTAssertNil(manager.contentShownDeadlineTimer)
+        XCTAssertFalse(timer.isValid)
+    }
+
+    func testNonContentShownEvent_leavesDeadlineTimerRunning() {
+        // A different event must NOT cancel the deadline.
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in }
+        manager.contentShownDeadlineTimer = timer
+
+        let json = "[{\"key\":\"some_other_event\",\"segmentation\":{\"a\":\"b\"}}]"
+        manager.recordEvents(withJSONString: json)
+
+        XCTAssertNotNil(manager.contentShownDeadlineTimer)
+        XCTAssertTrue(timer.isValid)
+        timer.invalidate()
     }
 
     func testDidReceiveScriptMessage_ignoredWhenWebViewClosed() {

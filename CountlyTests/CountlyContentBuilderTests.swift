@@ -24,6 +24,7 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
         CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout = 0
         CountlyContentBuilderInternal.sharedInstance().disableZoom = false
+        CountlyContentBuilderInternal.sharedInstance().enableUniversalLinkHandling = false
         Countly.sharedInstance().halt(true)
         MockURLProtocol.requestHandler = nil
         super.tearDown()
@@ -350,6 +351,30 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         }
         Countly.sharedInstance().start(with: config)
         XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().disableZoom)
+    }
+
+    /**
+     * <pre>
+     * enableUniversalLinkHandling is a one-way config switch that plumbs to the internal builder.
+     *
+     * 1- A fresh CountlyContentConfig has it disabled by default
+     * 2- enableUniversalLinkHandling() turns it on and round-trips on the config
+     * 3- After start, the internal builder reflects it
+     * </pre>
+     */
+    func test_universalLinkHandling_configDefaultsAndPlumbing() {
+        XCTAssertFalse(CountlyContentConfig().getEnableUniversalLinkHandling())
+
+        let config = createContentTestConfig()
+        config.content().enableUniversalLinkHandling()
+        XCTAssertTrue(config.content().getEnableUniversalLinkHandling())
+
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableUniversalLinkHandling)
     }
 
     /**

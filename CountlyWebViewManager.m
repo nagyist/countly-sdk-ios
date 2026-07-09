@@ -30,6 +30,13 @@ static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
 // flag is off, the 60s safety-net timeout is used and the view closes on failure.
 static const NSTimeInterval kCLYLoadStallTimeout = 1.0;
 static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
+// Absolute deadline (seconds) by which the content must report [CLY]_content_shown, else the
+// web view is closed. Armed ONCE when the web view is created and never reset by reloads, so it
+// is a hard backstop the reload/stall machinery cannot defeat: no matter how the retry/verify
+// logic behaves, a content that never actually shows is torn down within this window. This is
+// the guaranteed replacement for the old fixed 60s close (which no longer applies once the
+// per-navigation stall timer shrinks under reload-on-stall).
+static const NSTimeInterval kCLYContentShownDeadline = 60.0;
 
 // TODO: improve logging, check edge cases
 @interface CountlyWebViewManager ()
@@ -46,6 +53,9 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 // Non-nil exactly while a reload is scheduled but not yet fired. Single source of truth for
 // "a retry is in progress"; cancellable so a load that succeeds first can cancel it.
 @property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
+// Absolute [CLY]_content_shown deadline timer (see kCLYContentShownDeadline). Armed once at
+// creation, cancelled when content_shown arrives, fires closeWebView otherwise.
+@property(nonatomic, strong) NSTimer *contentShownDeadlineTimer;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -168,6 +178,14 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     NSURLRequest *request = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:60];
     [webView loadRequest:request];
 
+    // Arm the absolute content-shown deadline ONCE (not per navigation, so reloads cannot
+    // extend it). If [CLY]_content_shown is not reported within kCLYContentShownDeadline, the
+    // web view is closed regardless of retry/stall/verify state.
+    __weak typeof(self) weakSelf = self;
+    self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
+        [weakSelf contentShownDeadlineReached];
+    }];
+
     CLYButton *dismissButton = [CLYButton dismissAlertButton:@"X"];
     [self configureDismissButton:dismissButton forWebView:webView];
 
@@ -225,15 +243,9 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     }
 
     if ([url containsString:@"cly_x_int=1"]) {
-        CLY_LOG_I(@"%s Opening url [%@] in external browser", __FUNCTION__, url);
-        [[UIApplication sharedApplication] openURL:navigationAction.request.URL options:@{} completionHandler:^(BOOL success) {
-            if (success) {
-                CLY_LOG_I(@"%s url [%@] opened in external browser", __FUNCTION__, url);
-            }
-            else {
-                CLY_LOG_I(@"%s unable to open url [%@] in external browser", __FUNCTION__, url);
-            }
-        }];
+        CLY_LOG_I(@"%s Opening external url [%@]", __FUNCTION__, url);
+        // Prefers the app (Universal Link) when enableUniversalLinkHandling is on, else browser.
+        [self openExternalURL:navigationAction.request.URL];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
@@ -252,9 +264,40 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         }
 
         decisionHandler(WKNavigationActionPolicyCancel);
-    } else {
-        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
     }
+
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+// Opens an external URL from the content. When universal-link handling is enabled
+// (CountlyContentConfig enableUniversalLinkHandling), the URL is first offered to the OS as a
+// Universal Link (UIApplicationOpenURLOptionUniversalLinksOnly), so a link matching the host
+// app's own associated domains opens the app (deep link) rather than being forced into Safari
+// -- which is what a plain openURL: does for an app's own Universal Link. Only if it is not a
+// Universal Link does it fall back to the system browser. When the option is off, it opens in
+// the browser as before.
+- (void)openExternalURL:(NSURL *)url {
+    if (!url) return;
+    UIApplication *application = UIApplication.sharedApplication;
+
+    if (CountlyContentBuilderInternal.sharedInstance.enableUniversalLinkHandling) {
+        [application openURL:url options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES} completionHandler:^(BOOL openedInApp) {
+            if (openedInApp) {
+                CLY_LOG_I(@"%s URL [%@] opened in the app via Universal Link.", __FUNCTION__, url.absoluteString);
+                return;
+            }
+            // Not a registered Universal Link: fall back to the system browser.
+            [application openURL:url options:@{} completionHandler:^(BOOL openedInBrowser) {
+                CLY_LOG_I(@"%s URL [%@] is not a Universal Link; opened in browser: %@.", __FUNCTION__, url.absoluteString, openedInBrowser ? @"YES" : @"NO");
+            }];
+        }];
+        return;
+    }
+
+    [application openURL:url options:@{} completionHandler:^(BOOL success) {
+        CLY_LOG_I(@"%s URL [%@] opened in browser: %@.", __FUNCTION__, url.absoluteString, success ? @"YES" : @"NO");
+    }];
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
@@ -483,6 +526,15 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         dispatch_block_cancel(self.pendingReloadBlock);
         self.pendingReloadBlock = nil;
     }
+}
+
+// The content never reported [CLY]_content_shown within kCLYContentShownDeadline. Close it,
+// regardless of hasAppeared: if content_shown had arrived this timer would have been cancelled,
+// so reaching here means nothing was ever actually shown (e.g. a blank-but-HTTP-200 page).
+- (void)contentShownDeadlineReached {
+    if (self.webViewClosed) return;
+    CLY_LOG_I(@"%s [CLY]_content_shown not received within %.0fs; closing web view.", __FUNCTION__, kCLYContentShownDeadline);
+    [self closeWebView];
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
@@ -775,6 +827,13 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
                 continue;
             }
 
+            // The page reported it is actually showing content: cancel the absolute
+            // content-shown deadline so a genuinely-displayed content is never torn down.
+            if ([key isEqualToString:@"[CLY]_content_shown"]) {
+                [self.contentShownDeadlineTimer invalidate];
+                self.contentShownDeadlineTimer = nil;
+            }
+
             [Countly.sharedInstance recordEvent:key segmentation:segmentation];
     }
 
@@ -789,15 +848,8 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         NSString *encoded = [urlString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]];
         url = encoded ? [NSURL URLWithString:encoded] : nil;
     }
-    if (url) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
-            if (success) {
-                CLY_LOG_I(@"URL [%@] opened in external browser", urlString);
-            } else {
-                CLY_LOG_I(@"Unable to open URL [%@] in external browser", urlString);
-            }
-        }];
-    }
+    // Prefers the app (Universal Link) when enableUniversalLinkHandling is on, else browser.
+    [self openExternalURL:url];
 }
 
 - (void)resizeWebViewWithJSONString:(NSString *)jsonString {
@@ -870,6 +922,8 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         self.loadStartDate = nil;
         [self.loadTimeoutTimer invalidate];
         self.loadTimeoutTimer = nil;
+        [self.contentShownDeadlineTimer invalidate];
+        self.contentShownDeadlineTimer = nil;
         [self cancelPendingReload];
         if (self.backgroundView) {
             [self.backgroundView.webView stopLoading];

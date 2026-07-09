@@ -88,6 +88,16 @@ typedef void (^ContentCallback)(ContentStatus contentStatus, NSDictionary<NSStri
  */
 - (void)disableZoom;
 - (BOOL)getDisableZoom;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
+ * Routes user-tapped http(s) links in the content web view to the operating system instead of
+ * rendering them inside the content overlay: a link that matches one of the app's associated
+ * domains opens the app (Universal Link / deep link), and any other link opens in the system
+ * browser. This is a one-way switch: once enabled it stays enabled. Disabled by default.
+ */
+- (void)enableUniversalLinkHandling;
+- (BOOL)getEnableUniversalLinkHandling;
 #endif
 
 NS_ASSUME_NONNULL_END

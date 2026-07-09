@@ -9,6 +9,7 @@
 @property(nonatomic) NSInteger resourceRetryCount;
 @property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) NSTimer *loadTimeoutTimer;
+@property(nonatomic, strong) NSTimer *contentShownDeadlineTimer;
 @property(nonatomic, strong) NSDate *loadStartDate;
 @property(nonatomic, copy) void (^dismissBlock)(void);
 @property(nonatomic, copy) void (^appearBlock)(void);
@@ -20,6 +21,8 @@
 - (void)closeWebView;
 - (void)retryOrCloseWebViewForReason:(NSString *)reason;
 - (void)cancelPendingReload;
+- (void)contentShownDeadlineReached;
+- (void)recordEventsWithJSONString:(NSString *)jsonString;
 
 @end
 #endif
