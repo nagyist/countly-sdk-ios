@@ -243,15 +243,9 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     }
 
     if ([url containsString:@"cly_x_int=1"]) {
-        CLY_LOG_I(@"%s Opening url [%@] in external browser", __FUNCTION__, url);
-        [[UIApplication sharedApplication] openURL:navigationAction.request.URL options:@{} completionHandler:^(BOOL success) {
-            if (success) {
-                CLY_LOG_I(@"%s url [%@] opened in external browser", __FUNCTION__, url);
-            }
-            else {
-                CLY_LOG_I(@"%s unable to open url [%@] in external browser", __FUNCTION__, url);
-            }
-        }];
+        CLY_LOG_I(@"%s Opening external url [%@]", __FUNCTION__, url);
+        // Prefers the app (Universal Link) when enableUniversalLinkHandling is on, else browser.
+        [self openExternalURL:navigationAction.request.URL];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
@@ -273,32 +267,37 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
         return;
     }
 
-    // Opt-in (CountlyContentConfig enableUniversalLinkHandling): hand a user-tapped http(s)
-    // link to the OS instead of rendering it in the content overlay. If it matches one of the
-    // app's associated domains it opens the app (Universal Link / deep link); otherwise it
-    // opens in the system browser. Only link activations are routed, so the initial content
-    // load, sub-resources, and reloads still load normally in the web view.
-    if (CountlyContentBuilderInternal.sharedInstance.enableUniversalLinkHandling
-        && navigationAction.navigationType == WKNavigationTypeLinkActivated
-        && ([url hasPrefix:@"https://"] || [url hasPrefix:@"http://"])) {
-        NSURL *linkURL = navigationAction.request.URL;
-        [[UIApplication sharedApplication] openURL:linkURL
-                                           options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES}
-                                 completionHandler:^(BOOL openedInApp) {
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+// Opens an external URL from the content. When universal-link handling is enabled
+// (CountlyContentConfig enableUniversalLinkHandling), the URL is first offered to the OS as a
+// Universal Link (UIApplicationOpenURLOptionUniversalLinksOnly), so a link matching the host
+// app's own associated domains opens the app (deep link) rather than being forced into Safari
+// -- which is what a plain openURL: does for an app's own Universal Link. Only if it is not a
+// Universal Link does it fall back to the system browser. When the option is off, it opens in
+// the browser as before.
+- (void)openExternalURL:(NSURL *)url {
+    if (!url) return;
+    UIApplication *application = UIApplication.sharedApplication;
+
+    if (CountlyContentBuilderInternal.sharedInstance.enableUniversalLinkHandling) {
+        [application openURL:url options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES} completionHandler:^(BOOL openedInApp) {
             if (openedInApp) {
-                CLY_LOG_I(@"%s Tapped link [%@] opened in the app via Universal Link.", __FUNCTION__, url);
+                CLY_LOG_I(@"%s URL [%@] opened in the app via Universal Link.", __FUNCTION__, url.absoluteString);
                 return;
             }
             // Not a registered Universal Link: fall back to the system browser.
-            [[UIApplication sharedApplication] openURL:linkURL options:@{} completionHandler:^(BOOL openedInBrowser) {
-                CLY_LOG_I(@"%s Tapped link [%@] is not a Universal Link; opened in browser: %@.", __FUNCTION__, url, openedInBrowser ? @"YES" : @"NO");
+            [application openURL:url options:@{} completionHandler:^(BOOL openedInBrowser) {
+                CLY_LOG_I(@"%s URL [%@] is not a Universal Link; opened in browser: %@.", __FUNCTION__, url.absoluteString, openedInBrowser ? @"YES" : @"NO");
             }];
         }];
-        decisionHandler(WKNavigationActionPolicyCancel);
         return;
     }
 
-    decisionHandler(WKNavigationActionPolicyAllow);
+    [application openURL:url options:@{} completionHandler:^(BOOL success) {
+        CLY_LOG_I(@"%s URL [%@] opened in browser: %@.", __FUNCTION__, url.absoluteString, success ? @"YES" : @"NO");
+    }];
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
@@ -849,15 +848,8 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
         NSString *encoded = [urlString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]];
         url = encoded ? [NSURL URLWithString:encoded] : nil;
     }
-    if (url) {
-        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
-            if (success) {
-                CLY_LOG_I(@"URL [%@] opened in external browser", urlString);
-            } else {
-                CLY_LOG_I(@"Unable to open URL [%@] in external browser", urlString);
-            }
-        }];
-    }
+    // Prefers the app (Universal Link) when enableUniversalLinkHandling is on, else browser.
+    [self openExternalURL:url];
 }
 
 - (void)resizeWebViewWithJSONString:(NSString *)jsonString {
