@@ -8,8 +8,29 @@
 #import "CountlyOverlayWindow.h"
 #import "CountlyWebViewController.h"
 #import "PassThroughBackgroundView.h"
+#import "CountlyContentBuilderInternal.h"
 
 #if (TARGET_OS_IOS)
+// Critical-resource load retries: how many times to reload the web view before
+// giving up when a critical (JS/CSS) resource fails to load. A single transient
+// network hiccup — e.g. a connection stalled under a burst of parallel asset
+// requests against an HTTP/1.1 / rate-limited edge — should not tear down otherwise
+// valid content. On reload, already-loaded resources are served from the in-session
+// cache, so the retry re-fetches only what failed. Mirrors the more tolerant Android
+// behavior (which never closes on a transient JS error event).
+static const NSInteger kCLYMaxResourceRetries = 2;
+static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
+// Fallback stall timeout (seconds) used only when reload-on-stall is enabled but no
+// timeout was configured (e.g. the SDK was not started via config in a unit test). The
+// real value comes from CountlyContentConfig setContentReloadOnStallTimeout: (default
+// 1000 ms). Kept short because a manual reload is observed to recover reliably: on reload
+// the already-fetched assets come from cache and the rest reuse the warm connection, so
+// the parallel-connection burst shrinks below the edge's limit. A stalled load fires no
+// JS 'error' event, so this timer is what triggers the reload for that case. When the
+// flag is off, the 60s safety-net timeout is used and the view closes on failure.
+static const NSTimeInterval kCLYLoadStallTimeout = 1.0;
+static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
+
 // TODO: improve logging, check edge cases
 @interface CountlyWebViewManager ()
 
@@ -20,6 +41,11 @@
 @property(nonatomic, strong) NSDate *loadStartDate;
 @property(nonatomic) BOOL hasAppeared;
 @property(nonatomic) BOOL webViewClosed;
+@property(nonatomic) NSInteger resourceRetryCount;
+@property(nonatomic) NSTimeInterval loadTimeoutInterval;
+// Non-nil exactly while a reload is scheduled but not yet fired. Single source of truth for
+// "a retry is in progress"; cancellable so a load that succeeds first can cancel it.
+@property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -34,6 +60,8 @@
     self.appearBlock = appearBlock;
     self.hasAppeared = NO;
     self.webViewClosed = NO;
+    self.resourceRetryCount = 0;
+    self.pendingReloadBlock = nil;
     // TODO: keyWindow deprecation fix
     _window = [CountlyOverlayWindow new];
     CountlyWebViewController *modal = [CountlyWebViewController new];
@@ -90,6 +118,34 @@
                            forMainFrameOnly:NO];
 
        [contentController addUserScript:resourceErrorScript];
+
+       // Opt-in (CountlyContentConfig disableZoom): prevent user zoom (pinch / double-tap) by
+       // enforcing the no-zoom viewport directives. Injected at document end so document.head
+       // exists. This PRESERVES the page's own width / initial-scale (only strips and re-adds
+       // maximum-scale / minimum-scale / user-scalable), so it disables zoom without changing
+       // the layout the content declared. The scroll-view pinch gesture is also disabled in
+       // configureWebView: as a native backstop.
+       if (CountlyContentBuilderInternal.sharedInstance.disableZoom) {
+           NSString *disableZoomJS =
+            @"(function(){"
+             "var m=document.querySelector('meta[name=viewport]');"
+             "if(m){"
+             "var kept=(m.content||'').split(',').map(function(s){return s.trim();}).filter(function(s){var l=s.toLowerCase();return s.length&&l.indexOf('maximum-scale')!==0&&l.indexOf('minimum-scale')!==0&&l.indexOf('user-scalable')!==0;});"
+             "kept.push('maximum-scale=1.0','minimum-scale=1.0','user-scalable=no');"
+             "m.content=kept.join(', ');"
+             "}else{"
+             "m=document.createElement('meta');m.name='viewport';"
+             "m.content='width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no';"
+             "(document.head||document.documentElement).appendChild(m);"
+             "}"
+             "})();";
+           WKUserScript *disableZoomScript =
+           [[WKUserScript alloc] initWithSource:disableZoomJS
+                                  injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+                               forMainFrameOnly:YES];
+           [contentController addUserScript:disableZoomScript];
+       }
+
        [contentController addScriptMessageHandler:self name:@"resourceLoadError"];
        [contentController addScriptMessageHandler:self name:@"resourceVerifyResult"];
 
@@ -100,6 +156,12 @@
     WKWebView *webView = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
     if (@available(iOS 11.0, *)) {
         webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    }
+    // When SDK debug is enabled, expose the content web view to Safari Web Inspector
+    // (iOS 16.4+ requires this to be set explicitly). Lets you inspect the Network and
+    // Console tabs of the content web view live from a Mac. Off in production.
+    if (@available(iOS 16.4, *)) {
+        webView.inspectable = CountlyCommon.sharedInstance.enableDebug;
     }
     [self configureWebView:webView];
 
@@ -120,6 +182,12 @@
     webView.layer.masksToBounds = NO;
     webView.opaque = NO;
     webView.scrollView.bounces = NO;
+    // Native backstop for the opt-in viewport zoom disable: turn off the scroll view's pinch
+    // gesture. Left alone (does not touch zoom scales, which interact with the page's
+    // initial-scale) unless disableZoom is enabled.
+    if (CountlyContentBuilderInternal.sharedInstance.disableZoom) {
+        webView.scrollView.pinchGestureRecognizer.enabled = NO;
+    }
     webView.navigationDelegate = self;
 
     [self.backgroundView addSubview:webView];
@@ -251,7 +319,13 @@
     CLY_LOG_I(@"%s Web view has started loading", __FUNCTION__);
     [self.loadTimeoutTimer invalidate];
     __weak typeof(self) weakSelf = self;
-    self.loadTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+    // Fast stall-detect (reload) when enabled, using the configurable stall timeout;
+    // otherwise a plain 60s safety-net close.
+    NSTimeInterval stall = CountlyContentBuilderInternal.sharedInstance.contentReloadOnStallTimeout;
+    if (stall <= 0) stall = kCLYLoadStallTimeout; // fallback default (e.g. SDK not started via config)
+    NSTimeInterval timeout = CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall ? stall : kCLYDefaultLoadTimeout;
+    self.loadTimeoutInterval = timeout;
+    self.loadTimeoutTimer = [NSTimer scheduledTimerWithTimeInterval:timeout repeats:NO block:^(NSTimer * _Nonnull timer) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         [strongSelf loadDidTimeout];
@@ -312,6 +386,12 @@
 - (void)notifyPageLoaded {
     if (self.webViewClosed || self.hasAppeared) return;
 
+    // Reaching here means the load verified good (all resources OK, or verification could
+    // not run). A successful load wins over a retry still pending from an earlier failure
+    // in this cycle: cancel it, otherwise the stale reload would wipe the now-good page and
+    // re-fire the page's on-load [CLY]_content_shown.
+    [self cancelPendingReload];
+
     [self.loadTimeoutTimer invalidate];
     self.loadTimeoutTimer = nil;
 
@@ -320,6 +400,88 @@
     self.backgroundView.hidden = NO;
     if (self.appearBlock) {
         self.appearBlock();
+    }
+}
+
+// A critical (JS/CSS) resource failed to load. Rather than closing the content
+// immediately, reload the web view up to kCLYMaxResourceRetries times before giving
+// up. This turns a transient network hiccup (e.g. a connection stalled under a burst
+// of parallel asset requests against a rate-limited / HTTP-1.1 edge) into a recoverable
+// event instead of a dismissed content. Multiple failures from the same load are
+// coalesced into a single reload. Must be called on the main thread.
+- (void)retryOrCloseWebViewForReason:(NSString *)reason {
+    if (self.webViewClosed) return;
+
+    // Once the content is visible, a late resource failure must not reload or tear it
+    // down: the injected error listener / PerformanceObserver stay active for the whole
+    // page life, so a dynamically-loaded or lazy resource failing after appearance would
+    // otherwise re-run the page (flashing it, discarding scroll / in-progress survey
+    // input, and re-firing on-load analytics) or dismiss content the user is using. The
+    // retry mechanism only recovers failures during the initial load.
+    if (self.hasAppeared) {
+        CLY_LOG_I(@"%s %@ — content already visible, treating as non-fatal.", __FUNCTION__, reason);
+        return;
+    }
+
+    // Reload-on-failure is opt-in. When disabled, keep the original behavior: close on failure.
+    if (!CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall) {
+        CLY_LOG_I(@"%s %@ — reload-on-stall disabled, closing web view.", __FUNCTION__, reason);
+        [self closeWebView];
+        return;
+    }
+
+    // A reload is already scheduled for this load cycle — coalesce further failures.
+    // pendingReloadBlock being non-nil is the single source of truth for "a reload is pending".
+    if (self.pendingReloadBlock) {
+        CLY_LOG_I(@"%s %@ — retry already scheduled, ignoring.", __FUNCTION__, reason);
+        return;
+    }
+
+    if (self.resourceRetryCount >= kCLYMaxResourceRetries) {
+        CLY_LOG_I(@"%s %@ — retries exhausted (%ld/%ld). Closing web view.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries);
+        [self closeWebView];
+        return;
+    }
+
+    self.resourceRetryCount += 1;
+    // Cancel the in-flight stall timer: we have committed to a reload, and the reload's
+    // own didStartProvisionalNavigation: will arm a fresh one. Leaving the old timer live
+    // risks a spurious loadDidTimeout in the reload-delay window.
+    [self.loadTimeoutTimer invalidate];
+    self.loadTimeoutTimer = nil;
+    NSTimeInterval delay = kCLYResourceRetryBaseDelay * self.resourceRetryCount;
+    CLY_LOG_I(@"%s %@ — retrying load (%ld/%ld) in %.1fs.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries, delay);
+
+    __weak typeof(self) weakSelf = self;
+    // Cancellable so a load that succeeds during the delay window can cancel this reload
+    // (see cancelPendingReload / notifyPageLoaded). Otherwise a stale reload would wipe the
+    // now-good page and re-fire the page's on-load [CLY]_content_shown.
+    dispatch_block_t reloadBlock = dispatch_block_create(0, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.pendingReloadBlock = nil;
+        // hasAppeared / webViewClosed are belt-and-suspenders: a successful load normally
+        // cancels this block outright, but never reload content that already loaded/closed.
+        if (strongSelf.webViewClosed || strongSelf.hasAppeared) return;
+        WKWebView *webView = strongSelf.backgroundView.webView;
+        if (!webView) {
+            [strongSelf closeWebView];
+            return;
+        }
+        CLY_LOG_I(@"%s Reloading web view (retry %ld/%ld).", __FUNCTION__, (long)strongSelf.resourceRetryCount, (long)kCLYMaxResourceRetries);
+        [webView reload];
+    });
+    self.pendingReloadBlock = reloadBlock;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), reloadBlock);
+}
+
+// Cancel a reload scheduled by retryOrCloseWebViewForReason: that has not fired yet. Called
+// when a load succeeds (notifyPageLoaded) or the view closes, so a stale reload can't reload a
+// page that already loaded.
+- (void)cancelPendingReload {
+    if (self.pendingReloadBlock) {
+        dispatch_block_cancel(self.pendingReloadBlock);
+        self.pendingReloadBlock = nil;
     }
 }
 
@@ -333,10 +495,11 @@
         NSString *tag = body[@"tag"];
         NSString *url = body[@"url"];
 
-        CLY_LOG_I(@"%s Critical resource (%@) failed to load: [%@]. Closing web view.", __FUNCTION__, tag, url);
+        CLY_LOG_I(@"%s Critical resource (%@) failed to load: [%@].", __FUNCTION__, tag, url);
 
+        NSString *reason = [NSString stringWithFormat:@"Critical resource (%@) failed to load: [%@]", tag, url];
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self closeWebView];
+            [self retryOrCloseWebViewForReason:reason];
         });
     }
     else if ([message.name isEqualToString:@"resourceVerifyResult"]) {
@@ -344,16 +507,41 @@
         NSArray *results = body[@"results"];
 
         if ([results isKindOfClass:[NSArray class]]) {
+            BOOL anyUnreachable = NO;
             for (NSDictionary *entry in results) {
                 NSInteger status = [entry[@"status"] integerValue];
                 if (status >= 400) {
-                    CLY_LOG_I(@"%s Critical resource (%@) returned HTTP %ld: [%@]. Closing web view.",
+                    CLY_LOG_I(@"%s Critical resource (%@) returned HTTP %ld: [%@].",
                               __FUNCTION__, entry[@"tag"], (long)status, entry[@"url"]);
+                    // This is the post-load HEAD verification (runs on didFinishNavigation):
+                    // the page has already finished loading and run its on-load JS, so a
+                    // reload from here would re-fire any analytics it recorded. Do NOT retry
+                    // from this path. Retries are driven only by the during-load
+                    // resourceLoadError path. Defer to an in-flight retry if one is already
+                    // scheduled, never tear down already-visible content, otherwise close.
+                    if (self.hasAppeared || self.pendingReloadBlock) {
+                        return;
+                    }
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [self closeWebView];
                     });
                     return;
                 }
+                if (status == 0) {
+                    // HEAD could not reach the resource (network error, not an HTTP status).
+                    anyUnreachable = YES;
+                }
+            }
+
+            // A critical resource is unreachable and reload-on-stall is enabled: the content is
+            // NOT verified good, so do NOT appear here. Appearing would also cancel a pending
+            // reload (see notifyPageLoaded), yet an unreachable resource is exactly what a
+            // reload recovers over the warm connection. Defer: an in-flight reload, or the
+            // still-running load-timeout timer, will drive the retry/close. When reload-on-stall
+            // is off there is no reload to protect, so keep the original show-anyway behavior.
+            if (anyUnreachable && !self.hasAppeared && CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall) {
+                CLY_LOG_I(@"%s A critical resource is unreachable (status 0); deferring to reload instead of appearing.", __FUNCTION__);
+                return;
             }
         }
 
@@ -682,6 +870,7 @@
         self.loadStartDate = nil;
         [self.loadTimeoutTimer invalidate];
         self.loadTimeoutTimer = nil;
+        [self cancelPendingReload];
         if (self.backgroundView) {
             [self.backgroundView.webView stopLoading];
             self.backgroundView.webView.navigationDelegate = nil;
@@ -715,9 +904,12 @@
 
 - (void)loadDidTimeout {
     if (self.hasAppeared || self.webViewClosed) return;
-    self.webViewClosed = YES;
-    CLY_LOG_I(@"%s Web view load timed out after 60s, closing", __FUNCTION__);
-    [self closeWebView];
+    CLY_LOG_I(@"%s Web view load stalled after %.1fs.", __FUNCTION__, self.loadTimeoutInterval);
+    // A stalled load fires no JS 'error' event, so it never reaches the resource-error
+    // retry path. Route it through the same retry here: reload (observed to recover)
+    // up to the retry cap, then close. Do NOT set webViewClosed first — that would make
+    // retryOrCloseWebViewForReason: bail out before it can retry.
+    [self retryOrCloseWebViewForReason:@"load stalled (no appearance)"];
 }
   #endif
 @end

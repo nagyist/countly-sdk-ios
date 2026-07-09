@@ -295,6 +295,9 @@ static dispatch_once_t onceToken;
     if(config.content.getWebViewDisplayOption){
         CountlyContentBuilderInternal.sharedInstance.webViewDisplayOption = config.content.getWebViewDisplayOption;
     }
+    CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall = config.content.getEnableContentReloadOnStall;
+    CountlyContentBuilderInternal.sharedInstance.contentReloadOnStallTimeout = config.content.getContentReloadOnStallTimeout / 1000.0;
+    CountlyContentBuilderInternal.sharedInstance.disableZoom = config.content.getDisableZoom;
 #endif
     
     [CountlyPerformanceMonitoring.sharedInstance startWithConfig:config.apm];

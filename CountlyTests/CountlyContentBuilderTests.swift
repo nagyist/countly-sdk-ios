@@ -20,6 +20,10 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
 
     override func tearDown() {
         CountlyContentBuilderInternal.sharedInstance().exitContentZone()
+        // Reset reload-on-stall / zoom state so it can't leak into later tests.
+        CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
+        CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout = 0
+        CountlyContentBuilderInternal.sharedInstance().disableZoom = false
         Countly.sharedInstance().halt(true)
         MockURLProtocol.requestHandler = nil
         super.tearDown()
@@ -286,6 +290,125 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         CountlyContentBuilderInternal.sharedInstance().enterContentZone([])
 
         wait(for: [fetchAfterExit], timeout: 15)
+    }
+
+    /**
+     * <pre>
+     * Content reload-on-stall configuration plumbs through to the internal builder.
+     *
+     * 1- A fresh CountlyContentConfig defaults the stall timeout to 1000 ms and reload disabled
+     * 2- enableContentReloadOnStall and setContentReloadOnStallTimeout: round-trip on the config
+     * 3- After start, the internal builder reflects the enabled flag and the timeout
+     *    converted from milliseconds to seconds (2500 ms -> 2.5 s)
+     * </pre>
+     */
+    func test_contentReloadOnStall_configDefaultsAndPlumbing() {
+        // 1- Fresh config object: default 1000 ms, reload disabled.
+        let freshContent = CountlyContentConfig()
+        XCTAssertEqual(freshContent.getContentReloadOnStallTimeout(), 1000)
+        XCTAssertFalse(freshContent.getEnableContentReloadOnStall())
+
+        // 2- Round-trip on the config used for start.
+        let config = createContentTestConfig()
+        config.content().setContentReloadOnStallTimeout(2500)
+        config.content().enableContentReloadOnStall()
+        XCTAssertEqual(config.content().getContentReloadOnStallTimeout(), 2500)
+        XCTAssertTrue(config.content().getEnableContentReloadOnStall())
+
+        // 3- Plumbed to the internal builder on start, converted ms -> seconds.
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall)
+        XCTAssertEqual(CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout, 2.5, accuracy: 0.0001)
+    }
+
+    /**
+     * <pre>
+     * disableZoom is a one-way config switch that plumbs through to the internal builder.
+     *
+     * 1- A fresh CountlyContentConfig has zoom enabled (disableZoom == false)
+     * 2- disableZoom() turns it on and round-trips on the config
+     * 3- After start, the internal builder reflects it
+     * </pre>
+     */
+    func test_disableZoom_configDefaultsAndPlumbing() {
+        // 1- Fresh config: zoom NOT disabled by default.
+        XCTAssertFalse(CountlyContentConfig().getDisableZoom())
+
+        // 2- One-way switch round-trips on the config used for start.
+        let config = createContentTestConfig()
+        config.content().disableZoom()
+        XCTAssertTrue(config.content().getDisableZoom())
+
+        // 3- Plumbed to the internal builder on start.
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().disableZoom)
+    }
+
+    /**
+     * <pre>
+     * The single-content presentation latch rejects a second concurrent presentation.
+     *
+     * Two content fetches completing near-simultaneously used to both pass the "already
+     * shown" guard (the flag was only set once the web view was presented, after a network
+     * round trip) and present two overlapping web views. tryBeginContentPresentation is an
+     * atomic test-and-set that closes that window.
+     *
+     * 1- From a clean state, the first presentation acquires the slot
+     * 2- A second presentation while the slot is held is rejected
+     * 3- After the shown content is dismissed, the slot is free again
+     * </pre>
+     */
+    func test_contentPresentationLatch_rejectsSecondConcurrentPresentation() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()  // known "not shown" state
+
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "first presentation should acquire the slot")
+        XCTAssertFalse(cb.tryBeginContentPresentation(), "second concurrent presentation must be rejected")
+        XCTAssertTrue(cb.isContentShownThreadSafe())
+
+        cb.endContentPresentation()
+        // endContentPresentation is async on the serial content queue; the subsequent sync
+        // read drains the queue (FIFO), so the slot reads free.
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "slot should be free again after dismissal")
+
+        cb.endContentPresentation()
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+    }
+
+    /**
+     * <pre>
+     * resetInstance releases the content slot through the serial content queue.
+     *
+     * The flag write in resetInstance must go through the same queue as every other accessor
+     * (not a raw ivar write), so a reset cannot race a concurrent claim and cannot leave the
+     * slot stuck "shown" (which would silently disable the content zone).
+     *
+     * 1- Claim the slot
+     * 2- resetInstance
+     * 3- The slot reads free (a subsequent claim succeeds)
+     * </pre>
+     */
+    func test_resetInstance_releasesContentSlot() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()
+
+        XCTAssertTrue(cb.tryBeginContentPresentation())
+        XCTAssertTrue(cb.isContentShownThreadSafe())
+
+        cb.resetInstance()
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "slot should be claimable again after reset")
+
+        cb.endContentPresentation()
     }
 }
 #endif

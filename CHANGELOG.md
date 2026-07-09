@@ -1,5 +1,9 @@
-## XX.XX.XX
+## 26.1.3
+* Added a content configuration option to reload the content web view when its load stalls, enabled via "enableContentReloadOnStall" on "CountlyContentConfig", with a configurable stall timeout "setContentReloadOnStallTimeout:" in milliseconds (default 1000).
+* Added a content configuration option to disable pinch zoom, disabled via "disableZoom".
 * Improved link handling for content and feedback widgets, so links that carry their own query parameters, such as deep links, are parsed correctly.
+
+* Mitigated an issue where two content web views could be presented at the same time when content fetches completed concurrently.
 
 ## 26.1.2
 * ! Minor breaking change ! Raised the minimum supported deployment target to iOS 12 and tvOS 12 (previously iOS 10 and tvOS 10) for compatibility with Xcode 26 and the iOS 26 SDK. Apps targeting iOS 10/11 or tvOS 10/11 are no longer supported.
