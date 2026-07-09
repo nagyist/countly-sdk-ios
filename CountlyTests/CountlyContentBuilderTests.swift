@@ -24,7 +24,7 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
         CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout = 0
         CountlyContentBuilderInternal.sharedInstance().disableZoom = false
-        CountlyContentBuilderInternal.sharedInstance().enableUniversalLinkHandling = false
+        CountlyContentBuilderInternal.sharedInstance().contentURLHandler = nil
         Countly.sharedInstance().halt(true)
         MockURLProtocol.requestHandler = nil
         super.tearDown()
@@ -355,26 +355,27 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
 
     /**
      * <pre>
-     * enableUniversalLinkHandling is a one-way config switch that plumbs to the internal builder.
+     * A content URL handler set on the config plumbs through to the internal builder.
      *
-     * 1- A fresh CountlyContentConfig has it disabled by default
-     * 2- enableUniversalLinkHandling() turns it on and round-trips on the config
-     * 3- After start, the internal builder reflects it
+     * 1- A fresh CountlyContentConfig has no handler by default
+     * 2- setContentURLHandler: round-trips on the config
+     * 3- After start, the internal builder holds the handler
      * </pre>
      */
-    func test_universalLinkHandling_configDefaultsAndPlumbing() {
-        XCTAssertFalse(CountlyContentConfig().getEnableUniversalLinkHandling())
+    func test_contentURLHandler_configDefaultsAndPlumbing() {
+        XCTAssertNil(CountlyContentConfig().getContentURLHandler())
 
         let config = createContentTestConfig()
-        config.content().enableUniversalLinkHandling()
-        XCTAssertTrue(config.content().getEnableUniversalLinkHandling())
+        let handler: (URL) -> Bool = { _ in true }
+        config.content().setContentURLHandler(handler)
+        XCTAssertNotNil(config.content().getContentURLHandler())
 
         MockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             return ("{}".data(using: .utf8)!, response, nil)
         }
         Countly.sharedInstance().start(with: config)
-        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableUniversalLinkHandling)
+        XCTAssertNotNil(CountlyContentBuilderInternal.sharedInstance().contentURLHandler)
     }
 
     /**

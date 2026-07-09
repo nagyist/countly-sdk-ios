@@ -244,7 +244,7 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
 
     if ([url containsString:@"cly_x_int=1"]) {
         CLY_LOG_I(@"%s Opening external url [%@]", __FUNCTION__, url);
-        // Prefers the app (Universal Link) when enableUniversalLinkHandling is on, else browser.
+        // Routed through the app's content URL handler if one is set, else the system browser.
         [self openExternalURL:navigationAction.request.URL];
         decisionHandler(WKNavigationActionPolicyCancel);
         return;
