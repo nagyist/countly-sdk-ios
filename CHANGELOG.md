@@ -1,7 +1,7 @@
 ## 26.1.3
 * Added a content configuration option to reload the content web view when its load stalls, enabled via "enableContentReloadOnStall" on "CountlyContentConfig", with a configurable stall timeout "setContentReloadOnStallTimeout:" in milliseconds (default 1000).
 * Added a content configuration option to disable pinch zoom, disabled via "disableZoom".
-* Added a content configuration option to open external content links as Universal Links (app deep links) when possible instead of always forcing them into the system browser, enabled via "enableUniversalLinkHandling".
+* Added a content configuration option to provide a handler for links opened from the content web view, so the app can route its own deep links instead of the SDK opening the system browser, set via "setContentURLHandler:".
 * Improved link handling for content and feedback widgets, so links that carry their own query parameters, such as deep links, are parsed correctly.
 
 ## 26.1.2

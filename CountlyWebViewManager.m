@@ -270,32 +270,21 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     decisionHandler(WKNavigationActionPolicyAllow);
 }
 
-// Opens an external URL from the content. When universal-link handling is enabled
-// (CountlyContentConfig enableUniversalLinkHandling), the URL is first offered to the OS as a
-// Universal Link (UIApplicationOpenURLOptionUniversalLinksOnly), so a link matching the host
-// app's own associated domains opens the app (deep link) rather than being forced into Safari
-// -- which is what a plain openURL: does for an app's own Universal Link. Only if it is not a
-// Universal Link does it fall back to the system browser. When the option is off, it opens in
-// the browser as before.
+// Opens an external URL from the content. If the host app has provided a content URL handler
+// (CountlyContentConfig setContentURLHandler:), the URL is offered to it first so the app can
+// route its own deep link (custom scheme or https) to the right screen; the handler returns
+// YES if it took over. If there is no handler, or it returns NO, the SDK opens the URL in the
+// system browser as before.
 - (void)openExternalURL:(NSURL *)url {
     if (!url) return;
-    UIApplication *application = UIApplication.sharedApplication;
 
-    if (CountlyContentBuilderInternal.sharedInstance.enableUniversalLinkHandling) {
-        [application openURL:url options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES} completionHandler:^(BOOL openedInApp) {
-            if (openedInApp) {
-                CLY_LOG_I(@"%s URL [%@] opened in the app via Universal Link.", __FUNCTION__, url.absoluteString);
-                return;
-            }
-            // Not a registered Universal Link: fall back to the system browser.
-            [application openURL:url options:@{} completionHandler:^(BOOL openedInBrowser) {
-                CLY_LOG_I(@"%s URL [%@] is not a Universal Link; opened in browser: %@.", __FUNCTION__, url.absoluteString, openedInBrowser ? @"YES" : @"NO");
-            }];
-        }];
+    ContentURLHandler handler = CountlyContentBuilderInternal.sharedInstance.contentURLHandler;
+    if (handler && handler(url)) {
+        CLY_LOG_I(@"%s URL [%@] handled by the app's content URL handler.", __FUNCTION__, url.absoluteString);
         return;
     }
 
-    [application openURL:url options:@{} completionHandler:^(BOOL success) {
+    [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
         CLY_LOG_I(@"%s URL [%@] opened in browser: %@.", __FUNCTION__, url.absoluteString, success ? @"YES" : @"NO");
     }];
 }

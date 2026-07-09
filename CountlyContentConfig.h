@@ -22,6 +22,12 @@ typedef enum: NSUInteger
 } WebViewDisplayOption;
 
 typedef void (^ContentCallback)(ContentStatus contentStatus, NSDictionary<NSString *, id>* contentData);
+
+// Handler the host app can provide to take over opening a link tapped in the content web view
+// (e.g. to route the app's own deep link to the right screen). Return YES if the app handled
+// the URL; return NO to let the SDK open it in the system browser as usual. Called on the main
+// thread.
+typedef BOOL (^ContentURLHandler)(NSURL *url);
 #endif
 
 @interface CountlyContentConfig : NSObject
@@ -91,13 +97,15 @@ typedef void (^ContentCallback)(ContentStatus contentStatus, NSDictionary<NSStri
 
 /**
  * This is an experimental feature and it can have breaking changes.
- * Routes user-tapped http(s) links in the content web view to the operating system instead of
- * rendering them inside the content overlay: a link that matches one of the app's associated
- * domains opens the app (Universal Link / deep link), and any other link opens in the system
- * browser. This is a one-way switch: once enabled it stays enabled. Disabled by default.
+ * Sets a handler that is called when a link is opened from the content web view (an external
+ * link or the content "link" action), letting the host app take over instead of the SDK
+ * opening the system browser. This is how an app routes its own deep links (custom scheme or
+ * https) to the correct screen. The handler receives the URL and returns YES if it handled it;
+ * returning NO (or not setting a handler) makes the SDK open the URL in the system browser as
+ * before. Called on the main thread.
  */
-- (void)enableUniversalLinkHandling;
-- (BOOL)getEnableUniversalLinkHandling;
+- (void)setContentURLHandler:(ContentURLHandler)handler;
+- (ContentURLHandler)getContentURLHandler;
 #endif
 
 NS_ASSUME_NONNULL_END
