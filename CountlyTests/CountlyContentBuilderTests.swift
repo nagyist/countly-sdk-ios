@@ -20,9 +20,10 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
 
     override func tearDown() {
         CountlyContentBuilderInternal.sharedInstance().exitContentZone()
-        // Reset reload-on-stall state so it can't leak into later tests.
+        // Reset reload-on-stall / zoom state so it can't leak into later tests.
         CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall = false
         CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout = 0
+        CountlyContentBuilderInternal.sharedInstance().disableZoom = false
         Countly.sharedInstance().halt(true)
         MockURLProtocol.requestHandler = nil
         super.tearDown()
@@ -322,6 +323,33 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         Countly.sharedInstance().start(with: config)
         XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall)
         XCTAssertEqual(CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout, 2.5, accuracy: 0.0001)
+    }
+
+    /**
+     * <pre>
+     * disableZoom is a one-way config switch that plumbs through to the internal builder.
+     *
+     * 1- A fresh CountlyContentConfig has zoom enabled (disableZoom == false)
+     * 2- disableZoom() turns it on and round-trips on the config
+     * 3- After start, the internal builder reflects it
+     * </pre>
+     */
+    func test_disableZoom_configDefaultsAndPlumbing() {
+        // 1- Fresh config: zoom NOT disabled by default.
+        XCTAssertFalse(CountlyContentConfig().getDisableZoom())
+
+        // 2- One-way switch round-trips on the config used for start.
+        let config = createContentTestConfig()
+        config.content().disableZoom()
+        XCTAssertTrue(config.content().getDisableZoom())
+
+        // 3- Plumbed to the internal builder on start.
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().disableZoom)
     }
 
     /**

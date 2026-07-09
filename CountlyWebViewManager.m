@@ -118,6 +118,34 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
                            forMainFrameOnly:NO];
 
        [contentController addUserScript:resourceErrorScript];
+
+       // Opt-in (CountlyContentConfig disableZoom): prevent user zoom (pinch / double-tap) by
+       // enforcing the no-zoom viewport directives. Injected at document end so document.head
+       // exists. This PRESERVES the page's own width / initial-scale (only strips and re-adds
+       // maximum-scale / minimum-scale / user-scalable), so it disables zoom without changing
+       // the layout the content declared. The scroll-view pinch gesture is also disabled in
+       // configureWebView: as a native backstop.
+       if (CountlyContentBuilderInternal.sharedInstance.disableZoom) {
+           NSString *disableZoomJS =
+            @"(function(){"
+             "var m=document.querySelector('meta[name=viewport]');"
+             "if(m){"
+             "var kept=(m.content||'').split(',').map(function(s){return s.trim();}).filter(function(s){var l=s.toLowerCase();return s.length&&l.indexOf('maximum-scale')!==0&&l.indexOf('minimum-scale')!==0&&l.indexOf('user-scalable')!==0;});"
+             "kept.push('maximum-scale=1.0','minimum-scale=1.0','user-scalable=no');"
+             "m.content=kept.join(', ');"
+             "}else{"
+             "m=document.createElement('meta');m.name='viewport';"
+             "m.content='width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no';"
+             "(document.head||document.documentElement).appendChild(m);"
+             "}"
+             "})();";
+           WKUserScript *disableZoomScript =
+           [[WKUserScript alloc] initWithSource:disableZoomJS
+                                  injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+                               forMainFrameOnly:YES];
+           [contentController addUserScript:disableZoomScript];
+       }
+
        [contentController addScriptMessageHandler:self name:@"resourceLoadError"];
        [contentController addScriptMessageHandler:self name:@"resourceVerifyResult"];
 
@@ -154,6 +182,12 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     webView.layer.masksToBounds = NO;
     webView.opaque = NO;
     webView.scrollView.bounces = NO;
+    // Native backstop for the opt-in viewport zoom disable: turn off the scroll view's pinch
+    // gesture. Left alone (does not touch zoom scales, which interact with the page's
+    // initial-scale) unless disableZoom is enabled.
+    if (CountlyContentBuilderInternal.sharedInstance.disableZoom) {
+        webView.scrollView.pinchGestureRecognizer.enabled = NO;
+    }
     webView.navigationDelegate = self;
 
     [self.backgroundView addSubview:webView];

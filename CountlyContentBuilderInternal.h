@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) WebViewDisplayOption webViewDisplayOption;
 @property (nonatomic, assign) BOOL enableContentReloadOnStall;
 @property (nonatomic, assign) NSTimeInterval contentReloadOnStallTimeout; // seconds
+@property (nonatomic, assign) BOOL disableZoom;
 @property (nonatomic, assign) int contentInitialDelay;
 
 + (instancetype)sharedInstance;

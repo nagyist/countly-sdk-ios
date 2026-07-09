@@ -79,6 +79,15 @@ typedef void (^ContentCallback)(ContentStatus contentStatus, NSDictionary<NSStri
  */
 - (void)setContentReloadOnStallTimeout:(NSUInteger)milliseconds;
 - (NSUInteger)getContentReloadOnStallTimeout;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
+ * Disables user zoom (pinch and double-tap) in the content web view. The page's own
+ * viewport width and initial scale are preserved; only zooming is turned off. This is a
+ * one-way switch: once enabled it stays enabled. Disabled by default.
+ */
+- (void)disableZoom;
+- (BOOL)getDisableZoom;
 #endif
 
 NS_ASSUME_NONNULL_END

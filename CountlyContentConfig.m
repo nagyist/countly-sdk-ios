@@ -13,6 +13,7 @@
 @property (nonatomic) WebViewDisplayOption webViewDisplayOption;
 @property (nonatomic) BOOL contentReloadOnStallEnabled;
 @property (nonatomic) NSUInteger contentReloadOnStallTimeoutMs;
+@property (nonatomic) BOOL zoomDisabled;
 #endif
 @end
 
@@ -82,6 +83,16 @@
 - (NSUInteger)getContentReloadOnStallTimeout
 {
     return _contentReloadOnStallTimeoutMs;
+}
+
+- (void)disableZoom
+{
+    _zoomDisabled = YES;
+}
+
+- (BOOL)getDisableZoom
+{
+    return _zoomDisabled;
 }
 #endif
 
