@@ -574,17 +574,20 @@ class CountlyWebViewManagerTests: XCTestCase {
         var dismissCalled = false
         manager.dismissBlock = { dismissCalled = true }
 
-        let js = """
-        window.webkit.messageHandlers.resourceLoadError.postMessage({
-            tag: "SCRIPT",
-            url: "https://example.com/broken.js"
-        });
+        // Deliver the message from a genuinely loaded page: evaluateJavaScript on a web view
+        // that never loaded a document delivers the postMessage only intermittently (no stable
+        // JS context), which made this test flaky. An inline script in loaded HTML is reliable.
+        let html = """
+        <html><body><script>
+        window.webkit.messageHandlers.resourceLoadError.postMessage({tag:"SCRIPT", url:"https://example.com/broken.js"});
+        </script></body></html>
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.loadHTMLString(html, baseURL: URL(string: "https://example.com"))
 
-        let settle = expectation(description: "settle")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle.fulfill() }
-        waitForExpectations(timeout: 2.0)
+        let scheduled = XCTNSPredicateExpectation(predicate: NSPredicate(block: { [weak manager] _, _ in
+            manager?.pendingReloadBlock != nil
+        }), object: nil)
+        wait(for: [scheduled], timeout: 5.0)
 
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertFalse(dismissCalled)
