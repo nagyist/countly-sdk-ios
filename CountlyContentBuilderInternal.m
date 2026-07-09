@@ -13,6 +13,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 @implementation CountlyContentBuilderInternal {
     BOOL _isRequestQueueLocked;
     BOOL _isCurrentlyContentShown;
+    BOOL _refreshRunnablePending;
     NSTimer *_requestTimer;
     NSTimer *_minuteTimer;
     dispatch_queue_t _contentQueue;
@@ -42,70 +43,73 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     return self;
 }
 
-- (BOOL)isRequestQueueLockedThreadSafe {
-    __block BOOL locked = NO;
+#pragma mark - Thread-safe flag helpers
+
+// Every BOOL flag below (_isRequestQueueLocked, _isCurrentlyContentShown,
+// _refreshRunnablePending) is accessed only through these helpers so all reads/writes are
+// serialized on the single serial _contentQueue. The blocks capture the raw ivar pointer,
+// which is safe because this class is a never-released singleton (its ivars outlive any
+// queued block).
+- (BOOL)readFlag:(BOOL *)flag {
     if (!_contentQueue) {
-        return _isRequestQueueLocked;
+        return *flag;
     }
+    __block BOOL value = NO;
     dispatch_sync(_contentQueue, ^{
-        locked = self->_isRequestQueueLocked;
+        value = *flag;
     });
-    return locked;
+    return value;
 }
 
-- (void)setRequestQueueLockedThreadSafe:(BOOL)locked {
+- (void)writeFlag:(BOOL *)flag value:(BOOL)value {
     if (!_contentQueue) {
-        _isRequestQueueLocked = locked;
+        *flag = value;
         return;
     }
     dispatch_async(_contentQueue, ^{
-        self->_isRequestQueueLocked = locked;
+        *flag = value;
     });
 }
 
-// Atomically claim the single "content is shown" slot. Returns YES if the caller acquired
-// it (it was free), NO if content is already shown or a racing fetch already claimed it, in
-// which case the caller MUST NOT present another web view. The flag is read at fetch-decision
-// time but was previously only set when the web view was presented (after a network round
-// trip), so two near-simultaneous fetches could both pass the guard and present two
-// overlapping web views. This test-and-set closes that window on the serial content queue.
-- (BOOL)tryBeginContentPresentation {
-    if (!_contentQueue) {
-        if (_isCurrentlyContentShown) return NO;
-        _isCurrentlyContentShown = YES;
-        return YES;
-    }
+// Atomically set *flag to YES if it was NO. Returns YES only for the caller that made the
+// NO->YES transition, so exactly one caller "wins" a contended flag.
+- (BOOL)testAndSetFlag:(BOOL *)flag {
     __block BOOL acquired = NO;
+    if (!_contentQueue) {
+        if (!*flag) { *flag = YES; acquired = YES; }
+        return acquired;
+    }
     dispatch_sync(_contentQueue, ^{
-        if (!self->_isCurrentlyContentShown) {
-            self->_isCurrentlyContentShown = YES;
-            acquired = YES;
-        }
+        if (!*flag) { *flag = YES; acquired = YES; }
     });
     return acquired;
 }
 
-// Release the content slot (called when the shown web view is dismissed) so the next zone
-// cycle can present again.
+- (BOOL)isRequestQueueLockedThreadSafe {
+    return [self readFlag:&_isRequestQueueLocked];
+}
+
+- (void)setRequestQueueLockedThreadSafe:(BOOL)locked {
+    [self writeFlag:&_isRequestQueueLocked value:locked];
+}
+
+// Atomically claim the single "content is shown" slot. Returns YES if the caller acquired it,
+// NO if content is already shown or a racing fetch already claimed it, in which case the caller
+// MUST NOT present another web view. Previously the flag was set only when the web view was
+// presented (after a network round trip), so two near-simultaneous fetches could both pass the
+// guard and present two overlapping web views; this test-and-set closes that window.
+- (BOOL)tryBeginContentPresentation {
+    return [self testAndSetFlag:&_isCurrentlyContentShown];
+}
+
+// Release the content slot (called when the shown web view is dismissed, or on reset) so the
+// next zone cycle can present again.
 - (void)endContentPresentation {
-    if (!_contentQueue) {
-        _isCurrentlyContentShown = NO;
-        return;
-    }
-    dispatch_async(_contentQueue, ^{
-        self->_isCurrentlyContentShown = NO;
-    });
+    [self writeFlag:&_isCurrentlyContentShown value:NO];
 }
 
 - (BOOL)isContentShownThreadSafe {
-    if (!_contentQueue) {
-        return _isCurrentlyContentShown;
-    }
-    __block BOOL shown = NO;
-    dispatch_sync(_contentQueue, ^{
-        shown = self->_isCurrentlyContentShown;
-    });
-    return shown;
+    return [self readFlag:&_isCurrentlyContentShown];
 }
 
 - (void)enterContentZone {
@@ -178,10 +182,25 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         return;
     }
 
+    // Coalesce refreshes: only one refresh runnable may be pending at a time. Without this,
+    // multiple refreshContentZone calls before the request queue flushes each append a runnable
+    // (addQueueFlushRunnable does not dedup); they then all fire together and trigger N
+    // concurrent content fetches (a burst against the edge) whose extra results are discarded.
+    if (![self testAndSetFlag:&_refreshRunnablePending]) {
+        CLY_LOG_I(@"%s a content refresh is already pending, skipping duplicate" ,__FUNCTION__);
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
     [CountlyConnectionManager.sharedInstance addQueueFlushRunnable:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        // Clear the pending flag first so a refresh requested during/after this flush can
+        // schedule the next one.
+        [strongSelf writeFlag:&strongSelf->_refreshRunnablePending value:NO];
         CLY_LOG_I(@"%s queue flueshed, will re-fetch contents" ,__FUNCTION__);
-        [self exitContentZone];
-        [self enterContentZone];
+        [strongSelf exitContentZone];
+        [strongSelf enterContentZone];
     }];
     [CountlyConnectionManager.sharedInstance attemptToSendStoredRequests];
 }
@@ -235,7 +254,10 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 - (void)resetInstance {
     CLY_LOG_I(@"%s", __FUNCTION__);
     [self clearContentState];
-    _isCurrentlyContentShown = NO;
+    // Clear the shown flag through the serial content queue (not a raw write) so it cannot
+    // race a concurrent tryBeginContentPresentation / read on the network-completion thread.
+    [self endContentPresentation];
+    [self writeFlag:&_refreshRunnablePending value:NO];
 }
 
 - (void)fetchContents {

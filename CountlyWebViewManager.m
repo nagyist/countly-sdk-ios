@@ -42,8 +42,9 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 @property(nonatomic) BOOL hasAppeared;
 @property(nonatomic) BOOL webViewClosed;
 @property(nonatomic) NSInteger resourceRetryCount;
-@property(nonatomic) BOOL retryInProgress;
 @property(nonatomic) NSTimeInterval loadTimeoutInterval;
+// Non-nil exactly while a reload is scheduled but not yet fired. Single source of truth for
+// "a retry is in progress"; cancellable so a load that succeeds first can cancel it.
 @property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
@@ -60,7 +61,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     self.hasAppeared = NO;
     self.webViewClosed = NO;
     self.resourceRetryCount = 0;
-    self.retryInProgress = NO;
+    self.pendingReloadBlock = nil;
     // TODO: keyWindow deprecation fix
     _window = [CountlyOverlayWindow new];
     CountlyWebViewController *modal = [CountlyWebViewController new];
@@ -396,7 +397,8 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     }
 
     // A reload is already scheduled for this load cycle — coalesce further failures.
-    if (self.retryInProgress) {
+    // pendingReloadBlock being non-nil is the single source of truth for "a reload is pending".
+    if (self.pendingReloadBlock) {
         CLY_LOG_I(@"%s %@ — retry already scheduled, ignoring.", __FUNCTION__, reason);
         return;
     }
@@ -408,7 +410,6 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     }
 
     self.resourceRetryCount += 1;
-    self.retryInProgress = YES;
     // Cancel the in-flight stall timer: we have committed to a reload, and the reload's
     // own didStartProvisionalNavigation: will arm a fresh one. Leaving the old timer live
     // risks a spurious loadDidTimeout in the reload-delay window.
@@ -428,7 +429,6 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         // hasAppeared / webViewClosed are belt-and-suspenders: a successful load normally
         // cancels this block outright, but never reload content that already loaded/closed.
         if (strongSelf.webViewClosed || strongSelf.hasAppeared) return;
-        strongSelf.retryInProgress = NO;
         WKWebView *webView = strongSelf.backgroundView.webView;
         if (!webView) {
             [strongSelf closeWebView];
@@ -441,15 +441,14 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), reloadBlock);
 }
 
-// Cancel a reload scheduled by retryOrCloseWebViewForReason: that has not fired yet, and
-// clear the in-progress flag. Called when a load succeeds (notifyPageLoaded) or the view
-// closes, so a stale reload can't reload a page that already loaded.
+// Cancel a reload scheduled by retryOrCloseWebViewForReason: that has not fired yet. Called
+// when a load succeeds (notifyPageLoaded) or the view closes, so a stale reload can't reload a
+// page that already loaded.
 - (void)cancelPendingReload {
     if (self.pendingReloadBlock) {
         dispatch_block_cancel(self.pendingReloadBlock);
         self.pendingReloadBlock = nil;
     }
-    self.retryInProgress = NO;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
@@ -474,6 +473,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         NSArray *results = body[@"results"];
 
         if ([results isKindOfClass:[NSArray class]]) {
+            BOOL anyUnreachable = NO;
             for (NSDictionary *entry in results) {
                 NSInteger status = [entry[@"status"] integerValue];
                 if (status >= 400) {
@@ -485,7 +485,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
                     // from this path. Retries are driven only by the during-load
                     // resourceLoadError path. Defer to an in-flight retry if one is already
                     // scheduled, never tear down already-visible content, otherwise close.
-                    if (self.hasAppeared || self.retryInProgress) {
+                    if (self.hasAppeared || self.pendingReloadBlock) {
                         return;
                     }
                     dispatch_async(dispatch_get_main_queue(), ^{
@@ -493,6 +493,21 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
                     });
                     return;
                 }
+                if (status == 0) {
+                    // HEAD could not reach the resource (network error, not an HTTP status).
+                    anyUnreachable = YES;
+                }
+            }
+
+            // A critical resource is unreachable and reload-on-stall is enabled: the content is
+            // NOT verified good, so do NOT appear here. Appearing would also cancel a pending
+            // reload (see notifyPageLoaded), yet an unreachable resource is exactly what a
+            // reload recovers over the warm connection. Defer: an in-flight reload, or the
+            // still-running load-timeout timer, will drive the retry/close. When reload-on-stall
+            // is off there is no reload to protect, so keep the original show-anyway behavior.
+            if (anyUnreachable && !self.hasAppeared && CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall) {
+                CLY_LOG_I(@"%s A critical resource is unreachable (status 0); deferring to reload instead of appearing.", __FUNCTION__);
+                return;
             }
         }
 

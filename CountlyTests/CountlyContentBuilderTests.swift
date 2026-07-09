@@ -355,5 +355,32 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         cb.endContentPresentation()
         XCTAssertFalse(cb.isContentShownThreadSafe())
     }
+
+    /**
+     * <pre>
+     * resetInstance releases the content slot through the serial content queue.
+     *
+     * The flag write in resetInstance must go through the same queue as every other accessor
+     * (not a raw ivar write), so a reset cannot race a concurrent claim and cannot leave the
+     * slot stuck "shown" (which would silently disable the content zone).
+     *
+     * 1- Claim the slot
+     * 2- resetInstance
+     * 3- The slot reads free (a subsequent claim succeeds)
+     * </pre>
+     */
+    func test_resetInstance_releasesContentSlot() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()
+
+        XCTAssertTrue(cb.tryBeginContentPresentation())
+        XCTAssertTrue(cb.isContentShownThreadSafe())
+
+        cb.resetInstance()
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "slot should be claimable again after reset")
+
+        cb.endContentPresentation()
+    }
 }
 #endif

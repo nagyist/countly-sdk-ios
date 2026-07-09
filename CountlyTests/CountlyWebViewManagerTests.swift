@@ -294,7 +294,7 @@ class CountlyWebViewManagerTests: XCTestCase {
         // A stalled load now triggers a retry (reload) instead of an immediate close.
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertEqual(manager.resourceRetryCount, 1)
-        XCTAssertTrue(manager.retryInProgress)
+        XCTAssertNotNil(manager.pendingReloadBlock)
     }
 
     func testLoadDidTimeout_closesAfterRetriesExhausted() {
@@ -449,10 +449,11 @@ class CountlyWebViewManagerTests: XCTestCase {
 
     func testDidReceiveScriptMessage_resourceVerifyResult_defersWhileRetryInProgress() {
         // If a during-load retry (resourceLoadError path) is already scheduled, a post-load
-        // verification failure must defer to it, not close.
+        // verification failure must defer to it, not close. A non-nil pendingReloadBlock marks
+        // a scheduled reload.
         manager.webViewClosed = false
         manager.hasAppeared = false
-        manager.retryInProgress = true
+        manager.pendingReloadBlock = { }
 
         let config = WKWebViewConfiguration()
         let contentController = config.userContentController
@@ -515,6 +516,45 @@ class CountlyWebViewManagerTests: XCTestCase {
         contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")
     }
 
+    func testDidReceiveScriptMessage_resourceVerifyResult_unreachableDefersInsteadOfAppearing() {
+        // A resource that is unreachable (HEAD status 0) is NOT verified-good: with reload-on-stall
+        // enabled (setUp enables it) the SDK must NOT appear here (which would cancel a pending
+        // reload); it defers so the reload/timeout can recover it.
+        manager.webViewClosed = false
+        manager.hasAppeared = false
+
+        var appeared = false
+        manager.appearBlock = { appeared = true }
+
+        let config = WKWebViewConfiguration()
+        let contentController = config.userContentController
+        contentController.add(manager, name: "resourceLoadError")
+        contentController.add(manager, name: "resourceVerifyResult")
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        let bgView = PassThroughBackgroundView(frame: .zero)
+        bgView.webView = webView
+        manager.backgroundView = bgView
+
+        let js = """
+        window.webkit.messageHandlers.resourceVerifyResult.postMessage({
+            results: [{tag: "SCRIPT", url: "https://example.com/vendor.js", status: 0}]
+        });
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle.fulfill() }
+        waitForExpectations(timeout: 2.0)
+
+        XCTAssertFalse(manager.hasAppeared)   // deferred, did not appear
+        XCTAssertFalse(appeared)
+        XCTAssertFalse(manager.webViewClosed) // and did not close from the verify path
+
+        contentController.removeScriptMessageHandler(forName: "resourceLoadError")
+        contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")
+    }
+
     func testDidReceiveScriptMessage_resourceLoadError_schedulesRetry() {
         manager.webViewClosed = false
         manager.hasAppeared = false
@@ -549,7 +589,7 @@ class CountlyWebViewManagerTests: XCTestCase {
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertFalse(dismissCalled)
         XCTAssertEqual(manager.resourceRetryCount, 1)
-        XCTAssertTrue(manager.retryInProgress)
+        XCTAssertNotNil(manager.pendingReloadBlock)
 
         contentController.removeScriptMessageHandler(forName: "resourceLoadError")
         contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")
@@ -642,7 +682,7 @@ class CountlyWebViewManagerTests: XCTestCase {
 
         XCTAssertFalse(manager.webViewClosed)
         XCTAssertFalse(dismissCalled)
-        XCTAssertFalse(manager.retryInProgress)
+        XCTAssertNil(manager.pendingReloadBlock)
         XCTAssertEqual(manager.resourceRetryCount, 0)
     }
 
@@ -655,14 +695,12 @@ class CountlyWebViewManagerTests: XCTestCase {
 
         // A stall/resource failure schedules a retry.
         manager.retryOrCloseWebView(forReason: "stall")
-        XCTAssertTrue(manager.retryInProgress)
         XCTAssertNotNil(manager.pendingReloadBlock)
         XCTAssertEqual(manager.resourceRetryCount, 1)
 
         // The load then verifies good / appears.
         manager.notifyPageLoaded()
         XCTAssertTrue(manager.hasAppeared)
-        XCTAssertFalse(manager.retryInProgress)   // retry cancelled
         XCTAssertNil(manager.pendingReloadBlock)  // scheduled block cancelled and cleared
 
         // Wait past the retry delay (0.6s): the cancelled reload must not fire or close the view.
@@ -678,11 +716,9 @@ class CountlyWebViewManagerTests: XCTestCase {
         manager.hasAppeared = false
 
         manager.retryOrCloseWebView(forReason: "stall")
-        XCTAssertTrue(manager.retryInProgress)
         XCTAssertNotNil(manager.pendingReloadBlock)
 
         manager.cancelPendingReload()
-        XCTAssertFalse(manager.retryInProgress)
         XCTAssertNil(manager.pendingReloadBlock)
 
         // The reload must not fire after cancellation.

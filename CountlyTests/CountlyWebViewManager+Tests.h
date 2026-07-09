@@ -7,7 +7,6 @@
 @property(nonatomic) BOOL webViewClosed;
 @property(nonatomic) BOOL hasAppeared;
 @property(nonatomic) NSInteger resourceRetryCount;
-@property(nonatomic) BOOL retryInProgress;
 @property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) NSTimer *loadTimeoutTimer;
 @property(nonatomic, strong) NSDate *loadStartDate;
