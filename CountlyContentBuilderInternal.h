@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL enableContentReloadOnStall;
 @property (nonatomic, assign) NSTimeInterval contentReloadOnStallTimeout; // seconds
 @property (nonatomic, assign) BOOL disableZoom;
-@property (nonatomic, copy) ContentURLHandler contentURLHandler;
+@property (nonatomic, copy, nullable) ContentURLHandler contentURLHandler;
 @property (nonatomic, assign) int contentInitialDelay;
 
 + (instancetype)sharedInstance;

@@ -104,8 +104,8 @@ typedef BOOL (^ContentURLHandler)(NSURL *url);
  * returning NO (or not setting a handler) makes the SDK open the URL in the system browser as
  * before. Called on the main thread.
  */
-- (void)setContentURLHandler:(ContentURLHandler)handler;
-- (ContentURLHandler)getContentURLHandler;
+- (void)setContentURLHandler:(nullable ContentURLHandler)handler;
+- (nullable ContentURLHandler)getContentURLHandler;
 #endif
 
 NS_ASSUME_NONNULL_END
