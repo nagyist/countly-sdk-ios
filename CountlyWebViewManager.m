@@ -30,6 +30,13 @@ static const NSTimeInterval kCLYResourceRetryBaseDelay = 0.6;
 // flag is off, the 60s safety-net timeout is used and the view closes on failure.
 static const NSTimeInterval kCLYLoadStallTimeout = 1.0;
 static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
+// Absolute deadline (seconds) by which the content must report [CLY]_content_shown, else the
+// web view is closed. Armed ONCE when the web view is created and never reset by reloads, so it
+// is a hard backstop the reload/stall machinery cannot defeat: no matter how the retry/verify
+// logic behaves, a content that never actually shows is torn down within this window. This is
+// the guaranteed replacement for the old fixed 60s close (which no longer applies once the
+// per-navigation stall timer shrinks under reload-on-stall).
+static const NSTimeInterval kCLYContentShownDeadline = 60.0;
 
 // TODO: improve logging, check edge cases
 @interface CountlyWebViewManager ()
@@ -46,6 +53,9 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 // Non-nil exactly while a reload is scheduled but not yet fired. Single source of truth for
 // "a retry is in progress"; cancellable so a load that succeeds first can cancel it.
 @property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
+// Absolute [CLY]_content_shown deadline timer (see kCLYContentShownDeadline). Armed once at
+// creation, cancelled when content_shown arrives, fires closeWebView otherwise.
+@property(nonatomic, strong) NSTimer *contentShownDeadlineTimer;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -167,6 +177,14 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 
     NSURLRequest *request = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:60];
     [webView loadRequest:request];
+
+    // Arm the absolute content-shown deadline ONCE (not per navigation, so reloads cannot
+    // extend it). If [CLY]_content_shown is not reported within kCLYContentShownDeadline, the
+    // web view is closed regardless of retry/stall/verify state.
+    __weak typeof(self) weakSelf = self;
+    self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
+        [weakSelf contentShownDeadlineReached];
+    }];
 
     CLYButton *dismissButton = [CLYButton dismissAlertButton:@"X"];
     [self configureDismissButton:dismissButton forWebView:webView];
@@ -485,6 +503,15 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     }
 }
 
+// The content never reported [CLY]_content_shown within kCLYContentShownDeadline. Close it,
+// regardless of hasAppeared: if content_shown had arrived this timer would have been cancelled,
+// so reaching here means nothing was ever actually shown (e.g. a blank-but-HTTP-200 page).
+- (void)contentShownDeadlineReached {
+    if (self.webViewClosed) return;
+    CLY_LOG_I(@"%s [CLY]_content_shown not received within %.0fs; closing web view.", __FUNCTION__, kCLYContentShownDeadline);
+    [self closeWebView];
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message
 {
@@ -775,6 +802,13 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
                 continue;
             }
 
+            // The page reported it is actually showing content: cancel the absolute
+            // content-shown deadline so a genuinely-displayed content is never torn down.
+            if ([key isEqualToString:@"[CLY]_content_shown"]) {
+                [self.contentShownDeadlineTimer invalidate];
+                self.contentShownDeadlineTimer = nil;
+            }
+
             [Countly.sharedInstance recordEvent:key segmentation:segmentation];
     }
 
@@ -870,6 +904,8 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         self.loadStartDate = nil;
         [self.loadTimeoutTimer invalidate];
         self.loadTimeoutTimer = nil;
+        [self.contentShownDeadlineTimer invalidate];
+        self.contentShownDeadlineTimer = nil;
         [self cancelPendingReload];
         if (self.backgroundView) {
             [self.backgroundView.webView stopLoading];

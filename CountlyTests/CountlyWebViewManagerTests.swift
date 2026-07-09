@@ -729,6 +729,52 @@ class CountlyWebViewManagerTests: XCTestCase {
         XCTAssertFalse(manager.hasAppeared)
     }
 
+    func testContentShownDeadlineReached_closesWebView() {
+        // The absolute deadline closes the web view when content_shown never arrived, even if
+        // the view had (blankly) "appeared" - content_shown would otherwise have cancelled it.
+        manager.webViewClosed = false
+        manager.hasAppeared = true
+
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let bgView = PassThroughBackgroundView(frame: .zero)
+        bgView.webView = webView
+        manager.backgroundView = bgView
+
+        let dismissExpectation = expectation(description: "Dismiss block called")
+        manager.dismissBlock = { dismissExpectation.fulfill() }
+
+        manager.contentShownDeadlineReached()
+
+        waitForExpectations(timeout: 3.0)
+        XCTAssertTrue(manager.webViewClosed)
+    }
+
+    func testContentShownEvent_cancelsDeadlineTimer() {
+        // Receiving a [CLY]_content_shown event cancels the absolute deadline, so genuinely
+        // shown content is never torn down by it.
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in }
+        manager.contentShownDeadlineTimer = timer
+
+        let json = "[{\"key\":\"[CLY]_content_shown\",\"segmentation\":{\"content_id\":\"abc\"}}]"
+        manager.recordEvents(withJSONString: json)
+
+        XCTAssertNil(manager.contentShownDeadlineTimer)
+        XCTAssertFalse(timer.isValid)
+    }
+
+    func testNonContentShownEvent_leavesDeadlineTimerRunning() {
+        // A different event must NOT cancel the deadline.
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in }
+        manager.contentShownDeadlineTimer = timer
+
+        let json = "[{\"key\":\"some_other_event\",\"segmentation\":{\"a\":\"b\"}}]"
+        manager.recordEvents(withJSONString: json)
+
+        XCTAssertNotNil(manager.contentShownDeadlineTimer)
+        XCTAssertTrue(timer.isValid)
+        timer.invalidate()
+    }
+
     func testDidReceiveScriptMessage_ignoredWhenWebViewClosed() {
         manager.webViewClosed = true
         manager.hasAppeared = false
