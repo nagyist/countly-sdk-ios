@@ -14,6 +14,7 @@
 @property (nonatomic) BOOL contentReloadOnStallEnabled;
 @property (nonatomic) NSUInteger contentReloadOnStallTimeoutMs;
 @property (nonatomic) BOOL zoomDisabled;
+@property (nonatomic) BOOL universalLinkHandlingEnabled;
 #endif
 @end
 
@@ -93,6 +94,16 @@
 - (BOOL)getDisableZoom
 {
     return _zoomDisabled;
+}
+
+- (void)enableUniversalLinkHandling
+{
+    _universalLinkHandlingEnabled = YES;
+}
+
+- (BOOL)getEnableUniversalLinkHandling
+{
+    return _universalLinkHandlingEnabled;
 }
 #endif
 

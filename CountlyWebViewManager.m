@@ -270,9 +270,35 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
         }
 
         decisionHandler(WKNavigationActionPolicyCancel);
-    } else {
-        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
     }
+
+    // Opt-in (CountlyContentConfig enableUniversalLinkHandling): hand a user-tapped http(s)
+    // link to the OS instead of rendering it in the content overlay. If it matches one of the
+    // app's associated domains it opens the app (Universal Link / deep link); otherwise it
+    // opens in the system browser. Only link activations are routed, so the initial content
+    // load, sub-resources, and reloads still load normally in the web view.
+    if (CountlyContentBuilderInternal.sharedInstance.enableUniversalLinkHandling
+        && navigationAction.navigationType == WKNavigationTypeLinkActivated
+        && ([url hasPrefix:@"https://"] || [url hasPrefix:@"http://"])) {
+        NSURL *linkURL = navigationAction.request.URL;
+        [[UIApplication sharedApplication] openURL:linkURL
+                                           options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES}
+                                 completionHandler:^(BOOL openedInApp) {
+            if (openedInApp) {
+                CLY_LOG_I(@"%s Tapped link [%@] opened in the app via Universal Link.", __FUNCTION__, url);
+                return;
+            }
+            // Not a registered Universal Link: fall back to the system browser.
+            [[UIApplication sharedApplication] openURL:linkURL options:@{} completionHandler:^(BOOL openedInBrowser) {
+                CLY_LOG_I(@"%s Tapped link [%@] is not a Universal Link; opened in browser: %@.", __FUNCTION__, url, openedInBrowser ? @"YES" : @"NO");
+            }];
+        }];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
+    decisionHandler(WKNavigationActionPolicyAllow);
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler {
