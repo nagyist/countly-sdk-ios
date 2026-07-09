@@ -495,6 +495,53 @@ class CountlyWebViewManagerTests: XCTestCase {
         XCTAssertEqual(manager.resourceRetryCount, 0)
     }
 
+    func testNotifyPageLoaded_cancelsPendingReloadAfterSuccess() {
+        // A reload scheduled from an earlier failure in the same load cycle must be cancelled
+        // once the load succeeds, so a stale reload can't reload the good page (which would
+        // re-fire the page's on-load [CLY]_content_shown).
+        manager.webViewClosed = false
+        manager.hasAppeared = false
+
+        // A stall/resource failure schedules a retry.
+        manager.retryOrCloseWebView(forReason: "stall")
+        XCTAssertTrue(manager.retryInProgress)
+        XCTAssertNotNil(manager.pendingReloadBlock)
+        XCTAssertEqual(manager.resourceRetryCount, 1)
+
+        // The load then verifies good / appears.
+        manager.notifyPageLoaded()
+        XCTAssertTrue(manager.hasAppeared)
+        XCTAssertFalse(manager.retryInProgress)   // retry cancelled
+        XCTAssertNil(manager.pendingReloadBlock)  // scheduled block cancelled and cleared
+
+        // Wait past the retry delay (0.6s): the cancelled reload must not fire or close the view.
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { settle.fulfill() }
+        waitForExpectations(timeout: 2.0)
+        XCTAssertFalse(manager.webViewClosed)
+        XCTAssertTrue(manager.hasAppeared)
+    }
+
+    func testCancelPendingReload_clearsScheduledRetry() {
+        manager.webViewClosed = false
+        manager.hasAppeared = false
+
+        manager.retryOrCloseWebView(forReason: "stall")
+        XCTAssertTrue(manager.retryInProgress)
+        XCTAssertNotNil(manager.pendingReloadBlock)
+
+        manager.cancelPendingReload()
+        XCTAssertFalse(manager.retryInProgress)
+        XCTAssertNil(manager.pendingReloadBlock)
+
+        // The reload must not fire after cancellation.
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { settle.fulfill() }
+        waitForExpectations(timeout: 2.0)
+        XCTAssertFalse(manager.webViewClosed)
+        XCTAssertFalse(manager.hasAppeared)
+    }
+
     func testDidReceiveScriptMessage_ignoredWhenWebViewClosed() {
         manager.webViewClosed = true
         manager.hasAppeared = false

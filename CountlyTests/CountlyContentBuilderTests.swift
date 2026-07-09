@@ -323,5 +323,37 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().enableContentReloadOnStall)
         XCTAssertEqual(CountlyContentBuilderInternal.sharedInstance().contentReloadOnStallTimeout, 2.5, accuracy: 0.0001)
     }
+
+    /**
+     * <pre>
+     * The single-content presentation latch rejects a second concurrent presentation.
+     *
+     * Two content fetches completing near-simultaneously used to both pass the "already
+     * shown" guard (the flag was only set once the web view was presented, after a network
+     * round trip) and present two overlapping web views. tryBeginContentPresentation is an
+     * atomic test-and-set that closes that window.
+     *
+     * 1- From a clean state, the first presentation acquires the slot
+     * 2- A second presentation while the slot is held is rejected
+     * 3- After the shown content is dismissed, the slot is free again
+     * </pre>
+     */
+    func test_contentPresentationLatch_rejectsSecondConcurrentPresentation() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()  // known "not shown" state
+
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "first presentation should acquire the slot")
+        XCTAssertFalse(cb.tryBeginContentPresentation(), "second concurrent presentation must be rejected")
+        XCTAssertTrue(cb.isContentShownThreadSafe())
+
+        cb.endContentPresentation()
+        // endContentPresentation is async on the serial content queue; the subsequent sync
+        // read drains the queue (FIFO), so the slot reads free.
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "slot should be free again after dismissal")
+
+        cb.endContentPresentation()
+        XCTAssertFalse(cb.isContentShownThreadSafe())
+    }
 }
 #endif

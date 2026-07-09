@@ -44,6 +44,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 @property(nonatomic) NSInteger resourceRetryCount;
 @property(nonatomic) BOOL retryInProgress;
 @property(nonatomic) NSTimeInterval loadTimeoutInterval;
+@property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
 @end
@@ -126,6 +127,12 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     WKWebView *webView = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
     if (@available(iOS 11.0, *)) {
         webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    }
+    // When SDK debug is enabled, expose the content web view to Safari Web Inspector
+    // (iOS 16.4+ requires this to be set explicitly). Lets you inspect the Network and
+    // Console tabs of the content web view live from a Mac. Off in production.
+    if (@available(iOS 16.4, *)) {
+        webView.inspectable = CountlyCommon.sharedInstance.enableDebug;
     }
     [self configureWebView:webView];
 
@@ -342,9 +349,13 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
 }
 
 - (void)notifyPageLoaded {
-    // Suppress appearance while a retry reload is pending, so the failing load
-    // never flashes broken content before the reload replaces it.
-    if (self.webViewClosed || self.hasAppeared || self.retryInProgress) return;
+    if (self.webViewClosed || self.hasAppeared) return;
+
+    // Reaching here means the load verified good (all resources OK, or verification could
+    // not run). A successful load wins over a retry still pending from an earlier failure
+    // in this cycle: cancel it, otherwise the stale reload would wipe the now-good page and
+    // re-fire the page's on-load [CLY]_content_shown.
+    [self cancelPendingReload];
 
     [self.loadTimeoutTimer invalidate];
     self.loadTimeoutTimer = nil;
@@ -407,9 +418,16 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
     CLY_LOG_I(@"%s %@ — retrying load (%ld/%ld) in %.1fs.", __FUNCTION__, reason, (long)self.resourceRetryCount, (long)kCLYMaxResourceRetries, delay);
 
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Cancellable so a load that succeeds during the delay window can cancel this reload
+    // (see cancelPendingReload / notifyPageLoaded). Otherwise a stale reload would wipe the
+    // now-good page and re-fire the page's on-load [CLY]_content_shown.
+    dispatch_block_t reloadBlock = dispatch_block_create(0, ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf.webViewClosed) return;
+        if (!strongSelf) return;
+        strongSelf.pendingReloadBlock = nil;
+        // hasAppeared / webViewClosed are belt-and-suspenders: a successful load normally
+        // cancels this block outright, but never reload content that already loaded/closed.
+        if (strongSelf.webViewClosed || strongSelf.hasAppeared) return;
         strongSelf.retryInProgress = NO;
         WKWebView *webView = strongSelf.backgroundView.webView;
         if (!webView) {
@@ -419,6 +437,19 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         CLY_LOG_I(@"%s Reloading web view (retry %ld/%ld).", __FUNCTION__, (long)strongSelf.resourceRetryCount, (long)kCLYMaxResourceRetries);
         [webView reload];
     });
+    self.pendingReloadBlock = reloadBlock;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), reloadBlock);
+}
+
+// Cancel a reload scheduled by retryOrCloseWebViewForReason: that has not fired yet, and
+// clear the in-progress flag. Called when a load succeeds (notifyPageLoaded) or the view
+// closes, so a stale reload can't reload a page that already loaded.
+- (void)cancelPendingReload {
+    if (self.pendingReloadBlock) {
+        dispatch_block_cancel(self.pendingReloadBlock);
+        self.pendingReloadBlock = nil;
+    }
+    self.retryInProgress = NO;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
@@ -676,6 +707,7 @@ static const NSTimeInterval kCLYDefaultLoadTimeout = 60.0;
         self.loadStartDate = nil;
         [self.loadTimeoutTimer invalidate];
         self.loadTimeoutTimer = nil;
+        [self cancelPendingReload];
         if (self.backgroundView) {
             [self.backgroundView.webView stopLoading];
             self.backgroundView.webView.navigationDelegate = nil;

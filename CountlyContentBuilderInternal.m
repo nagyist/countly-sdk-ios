@@ -63,18 +63,63 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     });
 }
 
+// Atomically claim the single "content is shown" slot. Returns YES if the caller acquired
+// it (it was free), NO if content is already shown or a racing fetch already claimed it, in
+// which case the caller MUST NOT present another web view. The flag is read at fetch-decision
+// time but was previously only set when the web view was presented (after a network round
+// trip), so two near-simultaneous fetches could both pass the guard and present two
+// overlapping web views. This test-and-set closes that window on the serial content queue.
+- (BOOL)tryBeginContentPresentation {
+    if (!_contentQueue) {
+        if (_isCurrentlyContentShown) return NO;
+        _isCurrentlyContentShown = YES;
+        return YES;
+    }
+    __block BOOL acquired = NO;
+    dispatch_sync(_contentQueue, ^{
+        if (!self->_isCurrentlyContentShown) {
+            self->_isCurrentlyContentShown = YES;
+            acquired = YES;
+        }
+    });
+    return acquired;
+}
+
+// Release the content slot (called when the shown web view is dismissed) so the next zone
+// cycle can present again.
+- (void)endContentPresentation {
+    if (!_contentQueue) {
+        _isCurrentlyContentShown = NO;
+        return;
+    }
+    dispatch_async(_contentQueue, ^{
+        self->_isCurrentlyContentShown = NO;
+    });
+}
+
+- (BOOL)isContentShownThreadSafe {
+    if (!_contentQueue) {
+        return _isCurrentlyContentShown;
+    }
+    __block BOOL shown = NO;
+    dispatch_sync(_contentQueue, ^{
+        shown = self->_isCurrentlyContentShown;
+    });
+    return shown;
+}
+
 - (void)enterContentZone {
-    
-    if(_isCurrentlyContentShown){
+
+    if([self isContentShownThreadSafe]){
         CLY_LOG_I(@"%s a content is already shown, skipping" ,__FUNCTION__);
         return;
     }
-    
+
     [self enterContentZone:@[]];
 }
 
 - (void)enterContentZone:(NSArray<NSString *> *)tags {
-    if(_isCurrentlyContentShown){
+    if([self isContentShownThreadSafe]){
         CLY_LOG_I(@"%s a content is already shown, skipping" ,__FUNCTION__);
         return;
     }
@@ -128,11 +173,11 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     {
         return;
     }
-    if(_isCurrentlyContentShown){
+    if([self isContentShownThreadSafe]){
         CLY_LOG_I(@"%s a content is already shown, skipping" ,__FUNCTION__);
         return;
     }
-    
+
     [CountlyConnectionManager.sharedInstance addQueueFlushRunnable:^{
         CLY_LOG_I(@"%s queue flueshed, will re-fetch contents" ,__FUNCTION__);
         [self exitContentZone];
@@ -147,7 +192,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         CLY_LOG_D(@"%s, refresh content zone is disabled, skipping JTE content refresh", __FUNCTION__);
         return;
     }
-    if(_isCurrentlyContentShown){
+    if([self isContentShownThreadSafe]){
         CLY_LOG_I(@"%s a content is already shown, skipping JTE content refresh" ,__FUNCTION__);
         return;
     }
@@ -210,11 +255,11 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         return;
     }
 
-    if(_isCurrentlyContentShown){
+    if([self isContentShownThreadSafe]){
         CLY_LOG_I(@"%s a content is already shown, skipping" ,__FUNCTION__);
         return;
     }
-    
+
     if ([self isRequestQueueLockedThreadSafe]) {
         return;
     }
@@ -327,7 +372,14 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         return;
     }
 
-    
+    // Claim the single content slot before dispatching to main. If content is already shown,
+    // or a racing content fetch already claimed it, skip: never present a second overlapping
+    // web view for the same zone.
+    if (![self tryBeginContentPresentation]) {
+        CLY_LOG_I(@"%s a content is already shown, skipping duplicate presentation", __FUNCTION__);
+        return;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^ {
         // Detect screen orientation
         UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
@@ -352,7 +404,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
             } dismissBlock:^
              {
                 CLY_LOG_I(@"%s webview dismissed", __FUNCTION__);
-                self->_isCurrentlyContentShown = NO;
+                [self endContentPresentation];
                 self->_minuteTimer = [NSTimer scheduledTimerWithTimeInterval:self->_zoneTimerInterval
                                                                  target:self
                                                                selector:@selector(enterContentZone)
@@ -363,7 +415,8 @@ NSString* const kCountlyCBFetchContent  = @"queue";
                 }
             }];
             CLY_LOG_I(@"%s webview initiated pausing content calls ", __FUNCTION__);
-            self->_isCurrentlyContentShown = YES;
+            // The shown slot was already claimed synchronously by tryBeginContentPresentation
+            // above, before this async block was dispatched.
             [self clearContentState];
     });
 }

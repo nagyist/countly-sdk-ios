@@ -8,6 +8,7 @@
 @property(nonatomic) BOOL hasAppeared;
 @property(nonatomic) NSInteger resourceRetryCount;
 @property(nonatomic) BOOL retryInProgress;
+@property(nonatomic, copy) dispatch_block_t pendingReloadBlock;
 @property(nonatomic, strong) NSTimer *loadTimeoutTimer;
 @property(nonatomic, strong) NSDate *loadStartDate;
 @property(nonatomic, copy) void (^dismissBlock)(void);
@@ -19,6 +20,7 @@
 - (void)loadDidTimeout;
 - (void)closeWebView;
 - (void)retryOrCloseWebViewForReason:(NSString *)reason;
+- (void)cancelPendingReload;
 
 @end
 #endif
