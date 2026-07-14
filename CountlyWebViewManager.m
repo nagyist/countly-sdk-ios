@@ -10,7 +10,7 @@
 #import "PassThroughBackgroundView.h"
 #import "CountlyContentBuilderInternal.h"
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 // Critical-resource load retries: how many times to reload the web view before
 // giving up when a critical (JS/CSS) resource fails to load. A single transient
 // network hiccup — e.g. a connection stalled under a burst of parallel asset
@@ -61,7 +61,7 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
 @end
 
 @implementation CountlyWebViewManager
-  #if (TARGET_OS_IOS)
+  #if (TARGET_OS_IOS || TARGET_OS_VISION)
 - (void)createWebViewWithURL:(NSURL *)url
                        frame:(CGRect)frame
                  appearBlock:(void(^ __nullable)(void))appearBlock
@@ -72,13 +72,12 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     self.webViewClosed = NO;
     self.resourceRetryCount = 0;
     self.pendingReloadBlock = nil;
-    // TODO: keyWindow deprecation fix
     _window = [CountlyOverlayWindow new];
     CountlyWebViewController *modal = [CountlyWebViewController new];
     modal.modalPresentationStyle = UIModalPresentationOverFullScreen;
     modal.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     _window.rootViewController = modal;
-    UIViewController *rootViewController = UIApplication.sharedApplication.keyWindow.rootViewController;
+    UIViewController *rootViewController = CountlyCommon.keyWindow.rootViewController;
     modal.modalPresentationCapturesStatusBarAppearance = YES;
     CGRect backgroundFrame = rootViewController.view.bounds;
     self.backgroundView = [[PassThroughBackgroundView alloc] initWithFrame:backgroundFrame];
@@ -874,7 +873,7 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     }
 
     // Determine the current orientation
-    UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
+    UIInterfaceOrientation orientation = [CountlyCommon.sharedInstance interfaceOrientation];
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
 
     // Select the appropriate dimensions based on orientation
