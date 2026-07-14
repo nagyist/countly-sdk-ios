@@ -1,6 +1,8 @@
 ## XX.XX.XX
 * Added support for reporting the app's current theme (light or dark) when presenting feedback widgets, rating widgets, and content, so they are displayed in matching conditions.
 
+* Mitigated an issue where feedback widgets could be closed automatically after about a minute even while the user was still interacting with them.
+
 ## 26.1.3
 * Added a content configuration option to reload the content web view when its load stalls, enabled via "enableContentReloadOnStall" on "CountlyContentConfig", with a configurable stall timeout "setContentReloadOnStallTimeout:" in milliseconds (default 1000).
 * Added a content configuration option to disable pinch zoom, disabled via "disableZoom".

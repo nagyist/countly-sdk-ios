@@ -181,10 +181,15 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     // Arm the absolute content-shown deadline ONCE (not per navigation, so reloads cannot
     // extend it). If [CLY]_content_shown is not reported within kCLYContentShownDeadline, the
     // web view is closed regardless of retry/stall/verify state.
-    __weak typeof(self) weakSelf = self;
-    self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
-        [weakSelf contentShownDeadlineReached];
-    }];
+    // Only for CONTENT: feedback widgets (survey/NPS/rating) load a different SDK-built URL and
+    // never report [CLY]_content_shown, so arming the deadline for them would force-close a
+    // widget the user is still filling out. Skip it for feedback widget URLs.
+    if (![self isFeedbackWidgetURL:url]) {
+        __weak typeof(self) weakSelf = self;
+        self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
+            [weakSelf contentShownDeadlineReached];
+        }];
+    }
 
     CLYButton *dismissButton = [CLYButton dismissAlertButton:@"X"];
     [self configureDismissButton:dismissButton forWebView:webView];
@@ -524,6 +529,20 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     if (self.webViewClosed) return;
     CLY_LOG_I(@"%s [CLY]_content_shown not received within %.0fs; closing web view.", __FUNCTION__, kCLYContentShownDeadline);
     [self closeWebView];
+}
+
+// A feedback widget is presented through the same web view manager but loads a URL the SDK
+// builds in the feedback module as "<host>/feedback/<type>?...&widget_id=<id>&..." (see
+// CountlyFeedbackWidget generateWidgetURL), whereas content loads "<host>/_external/content?...".
+// Feedback widgets never report [CLY]_content_shown, so we must not arm the content-shown
+// deadline for them. Recognized by the SDK's own "/feedback/" endpoint path segment
+// (kCountlyEndpointFeedback), which content URLs never contain.
+- (BOOL)isFeedbackWidgetURL:(NSURL *)url {
+    if (!url) return NO;
+    NSString *path = url.path;
+    if (!path) return NO;
+    NSString *feedbackSegment = [kCountlyEndpointFeedback stringByAppendingString:@"/"];
+    return [path rangeOfString:feedbackSegment].location != NSNotFound;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController

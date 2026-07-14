@@ -765,6 +765,24 @@ class CountlyWebViewManagerTests: XCTestCase {
         XCTAssertFalse(timer.isValid)
     }
 
+    func testIsFeedbackWidgetURL_recognizesFeedbackWidgetURLs() {
+        // Feedback widget URLs (host/feedback/<type>?...&widget_id=...) must be recognized so the
+        // content-shown deadline is NOT armed for them (widgets never emit [CLY]_content_shown).
+        XCTAssertTrue(manager.isFeedbackWidgetURL(URL(string: "https://example.count.ly/feedback/nps?app_key=k&widget_id=abc123")!))
+        XCTAssertTrue(manager.isFeedbackWidgetURL(URL(string: "https://example.count.ly/feedback/survey?widget_id=x")!))
+        XCTAssertTrue(manager.isFeedbackWidgetURL(URL(string: "https://example.count.ly/feedback/rating?widget_id=x")!))
+        // Base-path host still matches (uses a path-segment contains check, not a prefix).
+        XCTAssertTrue(manager.isFeedbackWidgetURL(URL(string: "https://example.com/base/feedback/nps?widget_id=x")!))
+    }
+
+    func testIsFeedbackWidgetURL_rejectsContentURLs() {
+        // Content URLs (host/_external/content?...) must NOT be treated as feedback widgets, so
+        // the content-shown deadline stays armed for real content.
+        XCTAssertFalse(manager.isFeedbackWidgetURL(URL(string: "https://countly.teb.com.tr/_external/content?app_id=1&id=2&journeyId=3")!))
+        XCTAssertFalse(manager.isFeedbackWidgetURL(URL(string: "https://example.count.ly/o/sdk/content?method=queue")!))
+        XCTAssertFalse(manager.isFeedbackWidgetURL(URL(string: "about:blank")!))
+    }
+
     func testNonContentShownEvent_leavesDeadlineTimerRunning() {
         // A different event must NOT cancel the deadline.
         let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { _ in }
