@@ -23,6 +23,7 @@
 - (void)cancelPendingReload;
 - (void)contentShownDeadlineReached;
 - (void)recordEventsWithJSONString:(NSString *)jsonString;
+- (BOOL)isFeedbackWidgetURL:(NSURL *)url;
 
 @end
 #endif
