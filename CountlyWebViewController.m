@@ -5,10 +5,11 @@
 // Please visit www.count.ly for more information.
 //
 #import "CountlyWebViewController.h"
+#import "CountlyCommon.h"
 #import "PassThroughBackgroundView.h"
 #import "TouchDelegatingView.h"
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 @implementation CountlyWebViewController
 {
     UIStatusBarStyle _cachedStatusBarStyle;
@@ -47,27 +48,8 @@
 }
 
 - (UIWindow *)getKeyWindow {
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) {
-                continue;
-            }
-            
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            
-            if (windowScene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *window in windowScene.windows) {
-                    if (window.isKeyWindow) {
-                        return window;
-                    }
-                }
-            }
-        }
-    } else {
-        return UIApplication.sharedApplication.keyWindow;
-    }
-    
-    return nil;
+    // Unified key-window resolution (foreground-active scene, correct across multi-scene apps).
+    return CountlyCommon.keyWindow;
 }
 
 - (BOOL)shouldAutorotate
@@ -81,7 +63,7 @@
     CGRect bounds = keyWindow.rootViewController.view.bounds;
     
     if (CGRectIsEmpty(bounds)) {
-        bounds = UIScreen.mainScreen.bounds;
+        bounds = CountlyCommon.screenBounds;
     }
     
     self.view = [[TouchDelegatingView alloc] initWithFrame:bounds];

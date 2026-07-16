@@ -5,13 +5,13 @@
 // Please visit www.count.ly for more information.
 
 #import <Foundation/Foundation.h>
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 #import <UIKit/UIKit.h>
 #endif
 #import "CountlyCommon.h"
 NS_ASSUME_NONNULL_BEGIN
 @interface CountlyContentBuilderInternal: NSObject
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 @property (nonatomic, strong) NSArray<NSString *> *currentTags;
 @property (nonatomic, assign) NSTimeInterval zoneTimerInterval;
 @property (nonatomic) ContentCallback contentCallback;

@@ -19,7 +19,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     dispatch_queue_t _contentQueue;
 }
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 + (instancetype)sharedInstance {
     static CountlyContentBuilderInternal *instance = nil;
     static dispatch_once_t onceToken;
@@ -368,7 +368,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     //TODO: check why area is not clickable and safearea things
     CGSize size = [CountlyCommon.sharedInstance getWindowSize];
     
-    UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
+    UIInterfaceOrientation orientation = [CountlyCommon.sharedInstance interfaceOrientation];
     BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
 
     CGFloat lHpW = isLandscape ? size.height : size.width;
@@ -404,7 +404,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 
     dispatch_async(dispatch_get_main_queue(), ^ {
         // Detect screen orientation
-        UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
+        UIInterfaceOrientation orientation = [CountlyCommon.sharedInstance interfaceOrientation];
         BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
             
         // Get the appropriate coordinates based on the orientation

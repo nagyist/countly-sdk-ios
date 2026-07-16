@@ -1,5 +1,6 @@
 ## XX.XX.XX
 * Added support for reporting the app's current theme (light or dark) when presenting feedback widgets, rating widgets, and content, so they are displayed in matching conditions.
+* Added visionOS support for feedback widgets (NPS, Survey, and Rating) and content.
 
 * Mitigated an issue where feedback widgets could be closed automatically after about a minute even while the user was still interacting with them.
 

@@ -53,7 +53,7 @@ let package = Package(
                 .linkedFramework("IOKit", .when(platforms: [.macOS])),
                 .linkedFramework("UserNotifications", .when(platforms: [.iOS, .macOS, .visionOS])),
                 .linkedFramework("CoreLocation"),
-                .linkedFramework("WebKit", .when(platforms: [.iOS])),
+                .linkedFramework("WebKit", .when(platforms: [.iOS, .visionOS])),
                 .linkedFramework("CoreTelephony", .when(platforms: [.iOS])),
             ]),
         .testTarget(

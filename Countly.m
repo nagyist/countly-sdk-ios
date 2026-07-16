@@ -1311,7 +1311,7 @@ static dispatch_once_t onceToken;
 }
 #endif
 #pragma mark - Star Rating
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 
 - (void)askForStarRating:(void(^)(NSInteger rating))completion
 {
@@ -1604,7 +1604,7 @@ static dispatch_once_t onceToken;
 }
 
 #pragma mark - Interfaces
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 - (CountlyContentBuilder *) content
 {
     return CountlyContentBuilder.sharedInstance;

@@ -7,7 +7,7 @@
 #import "CountlyCommon.h"
 
 @interface CountlyContentConfig ()
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 @property (nonatomic) ContentCallback contentCallback;
 @property (nonatomic) NSUInteger zoneTimerInterval;
 @property (nonatomic) WebViewDisplayOption webViewDisplayOption;
@@ -24,7 +24,7 @@
 {
     if (self = [super init])
     {
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
         _contentReloadOnStallTimeoutMs = 1000; // default 1 second
 #endif
     }
@@ -32,7 +32,7 @@
     return self;
 }
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 -(void)setGlobalContentCallback:(ContentCallback) callback
 {
     _contentCallback = callback;
