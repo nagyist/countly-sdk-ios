@@ -1,6 +1,7 @@
-## 26.1.3
+## X.X.X
 * Added visionOS support for feedback widgets (NPS, Survey, and Rating) and content.
-* Fixed the feedback and content APIs being declared for visionOS in the public header but not implemented, which left them unavailable on visionOS builds.
+
+## 26.1.3
 * Added a content configuration option to reload the content web view when its load stalls, enabled via "enableContentReloadOnStall" on "CountlyContentConfig", with a configurable stall timeout "setContentReloadOnStallTimeout:" in milliseconds (default 1000).
 * Added a content configuration option to disable pinch zoom, disabled via "disableZoom".
 * Added a content configuration option to provide a handler for links opened from the content web view, so the app can route its own deep links instead of the SDK opening the system browser, set via "setContentURLHandler:".
