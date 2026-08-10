@@ -14,6 +14,7 @@
 @property (nonatomic) BOOL contentReloadOnStallEnabled;
 @property (nonatomic) NSUInteger contentReloadOnStallTimeoutMs;
 @property (nonatomic) BOOL zoomDisabled;
+@property (nonatomic) BOOL rotationDisabled;
 @property (nonatomic, copy) ContentURLHandler contentURLHandler;
 #endif
 @end
@@ -94,6 +95,16 @@
 - (BOOL)getDisableZoom
 {
     return _zoomDisabled;
+}
+
+- (void)disableRotation
+{
+    _rotationDisabled = YES;
+}
+
+- (BOOL)getDisableRotation
+{
+    return _rotationDisabled;
 }
 
 - (void)setContentURLHandler:(ContentURLHandler)handler

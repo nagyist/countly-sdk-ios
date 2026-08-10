@@ -42,9 +42,47 @@
     return UIStatusBarStyleLightContent;
 }
 
+// The view controller UIKit itself consults for this scene, or nil if unresolvable. This overlay
+// can both widen and narrow what the whole scene allows (verified on iOS 18.4/26.0), so the mask
+// must mirror the host: too wide rotates a locked app, too narrow force-rotates it out of
+// landscape. Follows only window-filling presentations, and never descends into nav/tab children
+// (UIKit asks the container) — which is why CountlyCommon.topViewController must not be reused.
+- (UIViewController *)hostOrientationAuthority
+{
+    UIViewController *vc = [self getKeyWindow].rootViewController;
+
+    if (!vc || vc == self)
+    {
+        return nil;
+    }
+
+    // Modals can be stacked; UIKit honours the topmost one that fills the window.
+    while ([self fillsWindow:vc.presentedViewController] && vc.presentedViewController != self)
+    {
+        vc = vc.presentedViewController;
+    }
+
+    return vc;
+}
+
+// UIKit ignores the orientation preferences of sheet-style presentations.
+- (BOOL)fillsWindow:(UIViewController *)viewController
+{
+    if (!viewController || viewController.isBeingDismissed)
+    {
+        return NO;
+    }
+
+    return viewController.modalPresentationStyle == UIModalPresentationFullScreen
+        || viewController.modalPresentationStyle == UIModalPresentationOverFullScreen;
+}
+
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations
 {
-    return UIInterfaceOrientationMaskAll;
+    UIViewController *authority = [self hostOrientationAuthority];
+
+    // No resolvable host: stay permissive rather than constrain a scene we know nothing about.
+    return authority ? [authority supportedInterfaceOrientations] : UIInterfaceOrientationMaskAll;
 }
 
 - (UIWindow *)getKeyWindow {
@@ -52,9 +90,21 @@
     return CountlyCommon.keyWindow;
 }
 
-- (BOOL)shouldAutorotate
+// No shouldAutorotate override on purpose: UIViewController already defaults to YES, it is
+// deprecated since iOS 16, and supportedInterfaceOrientations is what actually constrains rotation.
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator
 {
-    return YES;
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+
+    // Alongside the transition, not on completion: the view is already at the new size here, so the
+    // page re-lays out during the rotation animation rather than a beat after it finishes.
+    [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        if (self.sizeChangeHandler)
+        {
+            self.sizeChangeHandler(size);
+        }
+    } completion:nil];
 }
 
 - (void)loadView
@@ -124,7 +174,8 @@
     if ([self.contentView isKindOfClass:PassThroughBackgroundView.self])
     {
       PassThroughBackgroundView *content = (PassThroughBackgroundView *)self.contentView;
-      CGRect                     frame   = content.webView.frame;
+      // From the unadjusted placement, never the live frame: the shifts below are additive.
+      CGRect                     frame   = CGRectIsNull(content.baseWebViewFrame) ? content.webView.frame : content.baseWebViewFrame;
       if (CountlyContentBuilderInternal.sharedInstance.webViewDisplayOption == SAFE_AREA || [self hasTopNotch:safeArea])
       {
         frame.origin.y += safeArea.top; // always respect notch if exists

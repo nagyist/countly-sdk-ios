@@ -30,6 +30,9 @@ typedef NS_ENUM(NSUInteger, AnimationType) {
                  appearBlock:(void(^ __nullable)(void))appearBlock
                 dismissBlock:(void(^ __nullable)(void))dismissBlock;
 
+/// Tears down the web view and overlay window and invokes the dismiss block. Any thread, idempotent.
+- (void)closeWebView;
+
 
 
 @end

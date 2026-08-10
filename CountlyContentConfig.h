@@ -97,6 +97,16 @@ typedef BOOL (^ContentURLHandler)(NSURL *url);
 
 /**
  * This is an experimental feature and it can have breaking changes.
+ * Pins displayed content to the portrait layout: it is placed with the portrait dimensions
+ * whatever the device orientation is, and is not re-placed when the device is rotated. Content
+ * follows the device orientation by default. This is a one-way switch and never applies to
+ * feedback widgets.
+ */
+- (void)disableRotation;
+- (BOOL)getDisableRotation;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
  * Sets a handler that is called when a link is opened from the content web view (an external
  * link or the content "link" action), letting the host app take over instead of the SDK
  * opening the system browser. This is how an app routes its own deep links (custom scheme or

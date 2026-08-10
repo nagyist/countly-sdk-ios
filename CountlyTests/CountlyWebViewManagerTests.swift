@@ -12,6 +12,12 @@ import WebKit
 
 #if os(iOS)
 
+/// Records how many times the SDK prompts the page with a `{type:'resize'}` message.
+private final class ResizePromptSpy: PassThroughBackgroundView {
+    var promptCount = 0
+    override func updateWindowSize() { promptCount += 1 }
+}
+
 class CountlyWebViewManagerTests: XCTestCase {
 
     var manager: CountlyWebViewManager!
@@ -904,6 +910,109 @@ class CountlyWebViewManagerTests: XCTestCase {
 
         contentController.removeScriptMessageHandler(forName: "resourceLoadError")
         contentController.removeScriptMessageHandler(forName: "resourceVerifyResult")
+    }
+
+    // MARK: - Rotation
+
+    /// A manager holding a presented web view, without a network load.
+    private func makeManagerWithWebView() -> (CountlyWebViewManager, ResizePromptSpy) {
+        let m = CountlyWebViewManager()
+        let spy = ResizePromptSpy(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        spy.webView = WKWebView(frame: CGRect(x: 0, y: 500, width: 393, height: 300))
+        m.backgroundView = spy
+        m.isFeedbackWidget = false
+        return (m, spy)
+    }
+
+    /// An interface size change prompts the page; its resize_me reply is what re-places the content.
+    func testRotation_promptsThePage() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+        let (m, spy) = makeManagerWithWebView()
+
+        m.handleInterfaceSizeChange(CGSize(width: 852, height: 393))
+
+        XCTAssertEqual(spy.promptCount, 1)
+    }
+
+    /// A pinned content IS re-prompted — that is what corrects a page which laid out for the wrong
+    /// orientation. It is safe because the size reported to it is always portrait.
+    func testRotation_disableRotationStillPromptsThePage() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = true
+        let (m, spy) = makeManagerWithWebView()
+
+        m.handleInterfaceSizeChange(CGSize(width: 852, height: 393))
+
+        XCTAssertEqual(spy.promptCount, 1, "a pinned content must still be re-prompted")
+
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+    }
+
+    /// With the portrait pin on, a landscape measurement is transposed before the page is told.
+    func testPortraitAdjustedSize_transposesOnlyWhenPinned() {
+        let view = PassThroughBackgroundView(frame: .zero)
+        let landscape = CGSize(width: 852, height: 393)
+        let portrait = CGSize(width: 393, height: 852)
+
+        view.reportPortraitSizeOnly = false
+        XCTAssertEqual(view.portraitAdjustedSize(landscape), landscape, "unpinned reports the real size")
+
+        view.reportPortraitSizeOnly = true
+        XCTAssertEqual(view.portraitAdjustedSize(landscape), portrait, "pinned transposes a landscape size")
+        XCTAssertEqual(view.portraitAdjustedSize(portrait), portrait, "an already-portrait size is untouched")
+    }
+
+    /// disableRotation is content-only: a widget still rotates while content is pinned.
+    func testRotation_disableRotationDoesNotAffectFeedbackWidgets() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = true
+        let (m, spy) = makeManagerWithWebView()
+        m.isFeedbackWidget = true
+
+        m.handleInterfaceSizeChange(CGSize(width: 852, height: 393))
+
+        let expected = CGRect(origin: .zero, size: CountlyCommon.sharedInstance().getWindowSize())
+        XCTAssertEqual(m.backgroundView.webView.frame, expected, "a widget must not be gated by the content option")
+        XCTAssertEqual(spy.promptCount, 1)
+
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+    }
+
+    /// A closed web view is never prompted.
+    func testRotation_closedWebViewIsNotPrompted() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+        let (m, spy) = makeManagerWithWebView()
+        m.webViewClosed = true
+
+        m.handleInterfaceSizeChange(CGSize(width: 852, height: 393))
+
+        XCTAssertEqual(spy.promptCount, 0)
+    }
+
+    /// The page's resize_me reply sets the frame for the orientation it is in.
+    func testResize_appliesTheGeometryThePageReports() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+        let (m, _) = makeManagerWithWebView()
+
+        m.resizeWebView(withJSONString: "{\"p\":{\"x\":1,\"y\":2,\"w\":3,\"h\":4},\"l\":{\"x\":90,\"y\":90,\"w\":90,\"h\":90}}")
+
+        XCTAssertEqual(m.backgroundView.webView.frame, CGRect(x: 1, y: 2, width: 3, height: 4))
+    }
+
+    /// disableRotation pins content to portrait even when the page reports landscape dimensions.
+    func testResize_disableRotationPinsToPortraitDimensions() {
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = true
+        let (m, _) = makeManagerWithWebView()
+
+        // A landscape window, so the orientation pick would otherwise choose the landscape rect.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 852, height: 393))
+        window.addSubview(m.backgroundView)
+
+        m.resizeWebView(withJSONString: "{\"p\":{\"x\":1,\"y\":2,\"w\":3,\"h\":4},\"l\":{\"x\":90,\"y\":90,\"w\":90,\"h\":90}}")
+
+        XCTAssertEqual(m.backgroundView.webView.frame, CGRect(x: 1, y: 2, width: 3, height: 4),
+                       "the portrait rect must win while rotation is disabled")
+
+        m.backgroundView.removeFromSuperview()
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
     }
 }
 

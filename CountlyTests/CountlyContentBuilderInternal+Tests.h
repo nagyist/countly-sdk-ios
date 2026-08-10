@@ -9,5 +9,9 @@
 - (void)endContentPresentation;
 - (BOOL)isContentShownThreadSafe;
 
+// Zone re-entry timer + presentation entry point, so tests can drive a real presentation.
+- (BOOL)isZoneReentryTimerArmed;
+- (void)showContentWithHtmlPath:(NSString *)urlString placementCoordinates:(NSDictionary *)placementCoordinates;
+
 @end
 #endif

@@ -436,5 +436,92 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
 
         cb.endContentPresentation()
     }
+
+    // MARK: - Rotation
+
+    /// disableRotation is a one-way switch that defaults to off and plumbs through to the builder.
+    func test_disableRotation_configDefaultsAndPlumbing() {
+        XCTAssertFalse(CountlyContentConfig().getDisableRotation())
+
+        let config = createContentTestConfig()
+        config.content().disableRotation()
+        XCTAssertTrue(config.content().getDisableRotation())
+
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return ("{}".data(using: .utf8)!, response, nil)
+        }
+        Countly.sharedInstance().start(with: config)
+        XCTAssertTrue(CountlyContentBuilderInternal.sharedInstance().disableRotation)
+
+        CountlyContentBuilderInternal.sharedInstance().disableRotation = false
+    }
+
+    // MARK: - exitContentZone closes displayed content
+
+    /// Waits for pending main-queue work (FIFO), so a deferred teardown has completed.
+    private func drainMainQueue(_ description: String = "main queue drained") {
+        let marker = expectation(description: description)
+        DispatchQueue.main.async { marker.fulfill() }
+        waitForExpectations(timeout: 2)
+    }
+
+    /// exitContentZone must release the shown slot, or every later enter silently no-ops.
+    func test_exitContentZone_releasesShownSlot_soTheZoneIsNotDeadEnded() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()
+
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "content is now 'shown'")
+        XCTAssertTrue(cb.isContentShownThreadSafe())
+
+        cb.exitContentZone()
+        // Released as part of the teardown, not before it.
+        drainMainQueue()
+
+        XCTAssertFalse(cb.isContentShownThreadSafe(), "exitContentZone must release the shown slot")
+        XCTAssertTrue(cb.tryBeginContentPresentation(), "a later presentation must be possible again")
+
+        cb.endContentPresentation()
+    }
+
+    /// Closing content fires the dismiss block, which schedules the ~30s zone re-entry. An
+    /// SDK-initiated close must suppress it, or the zone the app exited comes back.
+    func test_exitContentZone_doesNotReArmTheZone_afterClosingDisplayedContent() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()
+
+        // A port nobody listens on: fails instantly, but a real web view is still created.
+        let placement: [String: Any] = ["x": 0, "y": 0, "w": 200, "h": 200]
+        cb.showContent(withHtmlPath: "https://localhost:1/content", placementCoordinates: ["p": placement, "l": placement])
+        drainMainQueue("content presented")
+
+        XCTAssertTrue(cb.isContentShownThreadSafe(), "content should be presented")
+
+        cb.exitContentZone()
+        drainMainQueue("content closed")
+        // closeWebView defers one more turn; the dismiss block runs there.
+        drainMainQueue("dismiss block ran")
+
+        XCTAssertFalse(cb.isContentShownThreadSafe(), "the content must be gone")
+        XCTAssertFalse(cb.isZoneReentryTimerArmed(), "an SDK-initiated close must not schedule a zone re-entry")
+
+        // The only test presenting a real overlay window; a lingering one leaks into other suites.
+        cb.resetInstance()
+        drainMainQueue("reset settled")
+    }
+
+    /// Internal zone cycles use clearContentState so a routine config apply cannot dismiss content.
+    func test_clearContentState_leavesDisplayedContentAlone() {
+        let cb = CountlyContentBuilderInternal.sharedInstance()
+        cb.resetInstance()
+
+        XCTAssertTrue(cb.tryBeginContentPresentation())
+
+        cb.clearContentState()
+
+        XCTAssertTrue(cb.isContentShownThreadSafe(), "clearContentState must not dismiss displayed content")
+
+        cb.endContentPresentation()
+    }
 }
 #endif

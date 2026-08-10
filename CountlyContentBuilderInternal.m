@@ -14,9 +14,13 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     BOOL _isRequestQueueLocked;
     BOOL _isCurrentlyContentShown;
     BOOL _refreshRunnablePending;
+    // Bumped per presentation claim, so a deferred teardown can tell if a newer one took the slot.
+    NSUInteger _presentationSequence;
     NSTimer *_requestTimer;
     NSTimer *_minuteTimer;
     dispatch_queue_t _contentQueue;
+    // The presented content's manager, retained so the zone can close it. Main thread only.
+    CountlyWebViewManager *_webViewManager;
 }
 
 #if (TARGET_OS_IOS || TARGET_OS_VISION)
@@ -99,7 +103,33 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 // presented (after a network round trip), so two near-simultaneous fetches could both pass the
 // guard and present two overlapping web views; this test-and-set closes that window.
 - (BOOL)tryBeginContentPresentation {
-    return [self testAndSetFlag:&_isCurrentlyContentShown];
+    __block BOOL acquired = NO;
+
+    if (!_contentQueue) {
+        if (!_isCurrentlyContentShown) { _isCurrentlyContentShown = YES; _presentationSequence++; acquired = YES; }
+        return acquired;
+    }
+
+    dispatch_sync(_contentQueue, ^{
+        if (!self->_isCurrentlyContentShown) {
+            self->_isCurrentlyContentShown = YES;
+            self->_presentationSequence++;
+            acquired = YES;
+        }
+    });
+
+    return acquired;
+}
+
+- (NSUInteger)currentPresentationSequence {
+    if (!_contentQueue) {
+        return _presentationSequence;
+    }
+    __block NSUInteger value = 0;
+    dispatch_sync(_contentQueue, ^{
+        value = self->_presentationSequence;
+    });
+    return value;
 }
 
 // Release the content slot (called when the shown web view is dismissed, or on reset) so the
@@ -110,6 +140,11 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 
 - (BOOL)isContentShownThreadSafe {
     return [self readFlag:&_isCurrentlyContentShown];
+}
+
+// Whether a zone re-entry is scheduled. Read by tests.
+- (BOOL)isZoneReentryTimerArmed {
+    return _minuteTimer != nil;
 }
 
 - (void)enterContentZone {
@@ -127,7 +162,7 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         CLY_LOG_I(@"%s a content is already shown, skipping" ,__FUNCTION__);
         return;
     }
-    
+
     [_minuteTimer invalidate];
     _minuteTimer = nil;
     
@@ -159,6 +194,34 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 
 - (void)exitContentZone {
     [self clearContentState];
+    // Also takes the content off screen. Internal cycles use clearContentState instead.
+    [self closeShownContent];
+}
+
+// Dismisses the content on screen and frees the presentation slot, in one main-queue turn.
+// The slot is deliberately not released earlier: that would let a fetch present a second web view
+// mid-teardown.
+- (void)closeShownContent {
+    NSUInteger requestedForSequence = [self currentPresentationSequence];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self currentPresentationSequence] != requestedForSequence) {
+            // A newer presentation owns the slot now; it is not ours to tear down.
+            CLY_LOG_D(@"%s a newer presentation superseded this close request, skipping", __FUNCTION__);
+            return;
+        }
+
+        CountlyWebViewManager *manager = self->_webViewManager;
+        if (manager) {
+            CLY_LOG_I(@"%s closing the currently shown content", __FUNCTION__);
+            // Cleared first so the dismiss block skips re-arming the zone for an SDK-initiated close.
+            self->_webViewManager = nil;
+            [manager closeWebView];
+        }
+
+        // Released even with nothing retained, so a stranded claim cannot dead-end later enters.
+        [self endContentPresentation];
+    });
 }
 
 - (void)changeContent:(NSArray<NSString *> *)tags {
@@ -199,7 +262,8 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         // schedule the next one.
         [strongSelf writeFlag:&strongSelf->_refreshRunnablePending value:NO];
         CLY_LOG_I(@"%s queue flueshed, will re-fetch contents" ,__FUNCTION__);
-        [strongSelf exitContentZone];
+        // State only: a refresh must never pull content off screen
+        [strongSelf clearContentState];
         [strongSelf enterContentZone];
     }];
     [CountlyConnectionManager.sharedInstance attemptToSendStoredRequests];
@@ -217,7 +281,8 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     }
 
     CLY_LOG_D(@"%s, Starting JTE content refresh with retries", __FUNCTION__);
-    [self exitContentZone];
+    // State only: a journey trigger must never pull content off screen
+    [self clearContentState];
     [self fetchContentsForJourneyWithMaxAttempts:3 currentAttempt:1];
 }
 
@@ -254,6 +319,8 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 - (void)resetInstance {
     CLY_LOG_I(@"%s", __FUNCTION__);
     [self clearContentState];
+    // A reset must not leave content on screen with no owner left to dismiss it
+    [self closeShownContent];
     // Clear the shown flag through the serial content queue (not a raw write) so it cannot
     // race a concurrent tryBeginContentPresentation / read on the network-completion thread.
     [self endContentPresentation];
@@ -405,18 +472,19 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     dispatch_async(dispatch_get_main_queue(), ^ {
         // Detect screen orientation
         UIInterfaceOrientation orientation = [CountlyCommon.sharedInstance interfaceOrientation];
-        BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
-            
-        // Get the appropriate coordinates based on the orientation
+        // disableRotation pins content to the portrait layout, whatever the device is doing.
+        BOOL isLandscape = self.disableRotation ? NO : UIInterfaceOrientationIsLandscape(orientation);
+
+        // Initial placement only; from here on the page's resize_me reply drives the size.
         NSDictionary *coordinates = isLandscape ? placementCoordinates[@"l"] : placementCoordinates[@"p"];
-        
+
         CGFloat x = [coordinates[@"x"] floatValue];
         CGFloat y = [coordinates[@"y"] floatValue];
         CGFloat width = [coordinates[@"w"] floatValue];
         CGFloat height = [coordinates[@"h"] floatValue];
-        
+
         CGRect frame = CGRectMake(x, y, width, height);
-        
+
         // Append the current theme so the content renders matching the app (resolved on the main
         // thread here, where the trait collection is safe to read).
         NSURL *themedURL = [NSURL URLWithString:[CountlyDeviceInfo URLStringByAppendingThemeMode:urlString]] ?: url;
@@ -424,18 +492,30 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         // Log the URL and the frame
         CLY_LOG_I(@"%s showing content from URL: [%@], frame: [%@]", __FUNCTION__, themedURL, NSStringFromCGRect(frame));
         CountlyWebViewManager* webViewManager =  CountlyWebViewManager.new;
+        // Retained so exitContentZone / resetInstance can dismiss what we present
+        self->_webViewManager = webViewManager;
+        // Weak: the manager owns this block, so a strong capture would be a retain cycle.
+        __weak CountlyWebViewManager *weakManager = webViewManager;
             [webViewManager createWebViewWithURL:themedURL frame:frame appearBlock:^
              {
                 CLY_LOG_I(@"%s webview should be appeared", __FUNCTION__);
             } dismissBlock:^
              {
                 CLY_LOG_I(@"%s webview dismissed", __FUNCTION__);
-                [self endContentPresentation];
-                self->_minuteTimer = [NSTimer scheduledTimerWithTimeInterval:self->_zoneTimerInterval
-                                                                 target:self
-                                                               selector:@selector(enterContentZone)
-                                                               userInfo:nil
-                                                                repeats:NO];
+
+                // Only the current content's dismissal may touch shared zone state; this block can
+                // belong to a superseded web view.
+                if (self->_webViewManager == weakManager) {
+                    self->_webViewManager = nil;
+                    [self endContentPresentation];
+                    self->_minuteTimer = [NSTimer scheduledTimerWithTimeInterval:self->_zoneTimerInterval
+                                                                     target:self
+                                                                   selector:@selector(enterContentZone)
+                                                                   userInfo:nil
+                                                                    repeats:NO];
+                }
+
+                // Reported regardless: this web view really did close.
                 if(self.contentCallback) {
                     self.contentCallback(CLOSED, NSDictionary.new);
                 }
