@@ -19,8 +19,11 @@ NSString* const kCountlyCBFetchContent  = @"queue";
     NSTimer *_requestTimer;
     NSTimer *_minuteTimer;
     dispatch_queue_t _contentQueue;
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
     // The presented content's manager, retained so the zone can close it. Main thread only.
+    // Guarded: CountlyWebViewManager only exists on iOS/visionOS, and this file builds everywhere.
     CountlyWebViewManager *_webViewManager;
+#endif
 }
 
 #if (TARGET_OS_IOS || TARGET_OS_VISION)
