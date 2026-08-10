@@ -205,6 +205,15 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 // The slot is deliberately not released earlier: that would let a fetch present a second web view
 // mid-teardown.
 - (void)closeShownContent {
+    // Synchronous when already on the main thread, which is where exitContentZone is called from in
+    // practice. Deferring the slot release would leave it claimed for the rest of the turn, so an
+    // exitContentZone immediately followed by enterContentZone would silently no-op and dead-end
+    // the zone.
+    if ([NSThread isMainThread]) {
+        [self tearDownShownContent];
+        return;
+    }
+
     NSUInteger requestedForSequence = [self currentPresentationSequence];
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -214,17 +223,22 @@ NSString* const kCountlyCBFetchContent  = @"queue";
             return;
         }
 
-        CountlyWebViewManager *manager = self->_webViewManager;
-        if (manager) {
-            CLY_LOG_I(@"%s closing the currently shown content", __FUNCTION__);
-            // Cleared first so the dismiss block skips re-arming the zone for an SDK-initiated close.
-            self->_webViewManager = nil;
-            [manager closeWebView];
-        }
-
-        // Released even with nothing retained, so a stranded claim cannot dead-end later enters.
-        [self endContentPresentation];
+        [self tearDownShownContent];
     });
+}
+
+// Main thread only.
+- (void)tearDownShownContent {
+    CountlyWebViewManager *manager = self->_webViewManager;
+    if (manager) {
+        CLY_LOG_I(@"%s closing the currently shown content", __FUNCTION__);
+        // Cleared first so the dismiss block skips re-arming the zone for an SDK-initiated close.
+        self->_webViewManager = nil;
+        [manager closeWebView];
+    }
+
+    // Released even with nothing retained, so a stranded claim cannot dead-end later enters.
+    [self endContentPresentation];
 }
 
 - (void)changeContent:(NSArray<NSString *> *)tags {
@@ -322,11 +336,10 @@ NSString* const kCountlyCBFetchContent  = @"queue";
 - (void)resetInstance {
     CLY_LOG_I(@"%s", __FUNCTION__);
     [self clearContentState];
-    // A reset must not leave content on screen with no owner left to dismiss it
+    // Also releases the shown slot. A second release here used to race its own deferred teardown:
+    // freeing the slot early let a fetch claim it, which made the queued close skip and strand the
+    // overlay with nothing left holding a reference to it.
     [self closeShownContent];
-    // Clear the shown flag through the serial content queue (not a raw write) so it cannot
-    // race a concurrent tryBeginContentPresentation / read on the network-completion thread.
-    [self endContentPresentation];
     [self writeFlag:&_refreshRunnablePending value:NO];
 }
 
@@ -472,7 +485,16 @@ NSString* const kCountlyCBFetchContent  = @"queue";
         return;
     }
 
+    NSUInteger claimedSequence = [self currentPresentationSequence];
+
     dispatch_async(dispatch_get_main_queue(), ^ {
+        // The zone can be exited while this is in flight, which releases our claim. Do not present
+        // content the app has already exited, and do not ride a claim a newer fetch has taken.
+        if (![self isContentShownThreadSafe] || [self currentPresentationSequence] != claimedSequence) {
+            CLY_LOG_I(@"%s the presentation claim was released before presenting, skipping", __FUNCTION__);
+            return;
+        }
+
         // Detect screen orientation
         UIInterfaceOrientation orientation = [CountlyCommon.sharedInstance interfaceOrientation];
         // disableRotation pins content to the portrait layout, whatever the device is doing.

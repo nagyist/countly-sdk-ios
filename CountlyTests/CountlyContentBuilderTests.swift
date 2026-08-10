@@ -475,10 +475,10 @@ class CountlyContentBuilderTests: CountlyBaseTestCase {
         XCTAssertTrue(cb.isContentShownThreadSafe())
 
         cb.exitContentZone()
-        // Released as part of the teardown, not before it.
-        drainMainQueue()
-
-        XCTAssertFalse(cb.isContentShownThreadSafe(), "exitContentZone must release the shown slot")
+        // Deliberately NO queue drain. The slot must be free by the time exitContentZone returns,
+        // otherwise an enterContentZone in the same turn hits the "already shown" guard, silently
+        // no-ops, and dead-ends the zone until the process restarts.
+        XCTAssertFalse(cb.isContentShownThreadSafe(), "the slot must be released synchronously on main")
         XCTAssertTrue(cb.tryBeginContentPresentation(), "a later presentation must be possible again")
 
         cb.endContentPresentation()

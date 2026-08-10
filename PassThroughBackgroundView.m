@@ -13,7 +13,9 @@
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
-    _baseWebViewFrame = CGRectNull;
+    if (self) {
+        _baseWebViewFrame = CGRectNull;
+    }
 #if (TARGET_OS_IOS)
     // No device-orientation observer: rotation is driven by the controller's transition callback,
     // which fires once the new size has settled. This one fired mid-rotation and duplicated it.
