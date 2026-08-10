@@ -498,16 +498,18 @@ static dispatch_once_t onceToken;
     {
         CountlyContentBuilderInternal.sharedInstance.zoneTimerInterval = config.content.getZoneTimerInterval;
     }
+    // clearContentState, not exitContentZone: this runs on every config apply, and exitContentZone
+    // would pull displayed content off screen.
     if (!_enterContentZone)
     {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [CountlyContentBuilderInternal.sharedInstance exitContentZone];
+            [CountlyContentBuilderInternal.sharedInstance clearContentState];
         });
     }
     else
     {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [CountlyContentBuilderInternal.sharedInstance exitContentZone];
+            [CountlyContentBuilderInternal.sharedInstance clearContentState];
             [CountlyContentBuilderInternal.sharedInstance enterContentZone:@[]];
         });
     }

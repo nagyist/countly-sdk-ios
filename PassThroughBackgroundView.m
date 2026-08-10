@@ -13,9 +13,12 @@
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
+    if (self) {
+        _baseWebViewFrame = CGRectNull;
+    }
 #if (TARGET_OS_IOS)
-    // Device-orientation and screen-mode change notifications do not exist on visionOS.
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleScreenChange) name:UIDeviceOrientationDidChangeNotification object:nil];
+    // No device-orientation observer: rotation is driven by the controller's transition callback,
+    // which fires once the new size has settled. This one fired mid-rotation and duplicated it.
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleScreenChange) name:UIScreenModeDidChangeNotification object:nil];
 #endif
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleScreenChange) name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -55,8 +58,18 @@
     });
 }
 
+// Swaps a landscape measurement to its portrait equivalent, matching how resolutionJson transposes
+// the dimensions it sends the server.
+- (CGSize)portraitAdjustedSize:(CGSize)size {
+    if (!self.reportPortraitSizeOnly || size.width <= size.height) {
+        return size;
+    }
+
+    return CGSizeMake(size.height, size.width);
+}
+
 - (void)updateWindowSize {
-    CGSize size = [CountlyCommon.sharedInstance getWindowSize];
+    CGSize size = [self portraitAdjustedSize:[CountlyCommon.sharedInstance getWindowSize]];
     CGFloat width = size.width;
     CGFloat height = size.height;
     

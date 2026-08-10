@@ -19,6 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL enableContentReloadOnStall;
 @property (nonatomic, assign) NSTimeInterval contentReloadOnStallTimeout; // seconds
 @property (nonatomic, assign) BOOL disableZoom;
+@property (nonatomic, assign) BOOL disableRotation;
 @property (nonatomic, copy, nullable) ContentURLHandler contentURLHandler;
 @property (nonatomic, assign) int contentInitialDelay;
 
@@ -26,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)enterContentZone:(NSArray<NSString *> *)tags;
 - (void)exitContentZone;
+/// Resets retrieval state without closing displayed content, unlike exitContentZone.
+- (void)clearContentState;
 - (void)resetInstance;
 - (void)changeContent:(NSArray<NSString *> *)tags;
 - (void)refreshContentZone;

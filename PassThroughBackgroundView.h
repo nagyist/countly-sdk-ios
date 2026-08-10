@@ -20,6 +20,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong) WKWebView *webView;
 @property(nonatomic, strong) CLYButton *dismissButton;
 
+/// The web view's placement before safe-area adjustment. Those insets are additive, so every
+/// placement pass must start here or they accumulate. CGRectNull means "not tracked".
+@property(nonatomic) CGRect baseWebViewFrame;
+
+/// When set, the page is always told the PORTRAIT-oriented size, whatever the device is doing.
+/// Set for content with disableRotation, so the page lays out for the portrait frame it is given.
+@property(nonatomic) BOOL reportPortraitSizeOnly;
+
+/// Tells the page its available size via a `{type:'resize'}` postMessage.
+- (void)updateWindowSize;
+
+/// Applies reportPortraitSizeOnly to a measured size. Exposed for tests.
+- (CGSize)portraitAdjustedSize:(CGSize)size;
+
 
 
 @end
