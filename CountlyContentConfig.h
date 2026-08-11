@@ -8,7 +8,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 typedef enum : NSUInteger
 {
     COMPLETED,
@@ -32,7 +32,7 @@ typedef BOOL (^ContentURLHandler)(NSURL *url);
 
 @interface CountlyContentConfig : NSObject
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 /**
  * This is an experimental feature and it can have breaking changes
  * Register global completion blocks to be executed on content.
@@ -94,6 +94,16 @@ typedef BOOL (^ContentURLHandler)(NSURL *url);
  */
 - (void)disableZoom;
 - (BOOL)getDisableZoom;
+
+/**
+ * This is an experimental feature and it can have breaking changes.
+ * Pins displayed content to the portrait layout: it is placed with the portrait dimensions
+ * whatever the device orientation is, and is not re-placed when the device is rotated. Content
+ * follows the device orientation by default. This is a one-way switch and never applies to
+ * feedback widgets.
+ */
+- (void)disableRotation;
+- (BOOL)getDisableRotation;
 
 /**
  * This is an experimental feature and it can have breaking changes.

@@ -298,6 +298,7 @@ static dispatch_once_t onceToken;
     CountlyContentBuilderInternal.sharedInstance.enableContentReloadOnStall = config.content.getEnableContentReloadOnStall;
     CountlyContentBuilderInternal.sharedInstance.contentReloadOnStallTimeout = config.content.getContentReloadOnStallTimeout / 1000.0;
     CountlyContentBuilderInternal.sharedInstance.disableZoom = config.content.getDisableZoom;
+    CountlyContentBuilderInternal.sharedInstance.disableRotation = config.content.getDisableRotation;
     CountlyContentBuilderInternal.sharedInstance.contentURLHandler = config.content.getContentURLHandler;
 #endif
     
@@ -1311,7 +1312,7 @@ static dispatch_once_t onceToken;
 }
 #endif
 #pragma mark - Star Rating
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 
 - (void)askForStarRating:(void(^)(NSInteger rating))completion
 {
@@ -1604,7 +1605,7 @@ static dispatch_once_t onceToken;
 }
 
 #pragma mark - Interfaces
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 - (CountlyContentBuilder *) content
 {
     return CountlyContentBuilder.sharedInstance;

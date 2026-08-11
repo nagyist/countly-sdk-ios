@@ -23,6 +23,12 @@
 - (void)cancelPendingReload;
 - (void)contentShownDeadlineReached;
 - (void)recordEventsWithJSONString:(NSString *)jsonString;
+- (void)resizeWebViewWithJSONString:(NSString *)jsonString;
+- (BOOL)isFeedbackWidgetURL:(NSURL *)url;
+
+// Rotation, so tests can drive a size change without a real device rotation.
+@property(nonatomic) BOOL isFeedbackWidget;
+- (void)handleInterfaceSizeChange:(CGSize)newSize;
 
 @end
 #endif

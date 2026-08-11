@@ -7,13 +7,14 @@
 #import "CountlyCommon.h"
 
 @interface CountlyContentConfig ()
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 @property (nonatomic) ContentCallback contentCallback;
 @property (nonatomic) NSUInteger zoneTimerInterval;
 @property (nonatomic) WebViewDisplayOption webViewDisplayOption;
 @property (nonatomic) BOOL contentReloadOnStallEnabled;
 @property (nonatomic) NSUInteger contentReloadOnStallTimeoutMs;
 @property (nonatomic) BOOL zoomDisabled;
+@property (nonatomic) BOOL rotationDisabled;
 @property (nonatomic, copy) ContentURLHandler contentURLHandler;
 #endif
 @end
@@ -24,7 +25,7 @@
 {
     if (self = [super init])
     {
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
         _contentReloadOnStallTimeoutMs = 1000; // default 1 second
 #endif
     }
@@ -32,7 +33,7 @@
     return self;
 }
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 -(void)setGlobalContentCallback:(ContentCallback) callback
 {
     _contentCallback = callback;
@@ -94,6 +95,16 @@
 - (BOOL)getDisableZoom
 {
     return _zoomDisabled;
+}
+
+- (void)disableRotation
+{
+    _rotationDisabled = YES;
+}
+
+- (BOOL)getDisableRotation
+{
+    return _rotationDisabled;
 }
 
 - (void)setContentURLHandler:(ContentURLHandler)handler

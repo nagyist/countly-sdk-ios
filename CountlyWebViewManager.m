@@ -10,7 +10,7 @@
 #import "PassThroughBackgroundView.h"
 #import "CountlyContentBuilderInternal.h"
 
-#if (TARGET_OS_IOS)
+#if (TARGET_OS_IOS || TARGET_OS_VISION)
 // Critical-resource load retries: how many times to reload the web view before
 // giving up when a critical (JS/CSS) resource fails to load. A single transient
 // network hiccup — e.g. a connection stalled under a burst of parallel asset
@@ -58,32 +58,41 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
 @property(nonatomic, strong) NSTimer *contentShownDeadlineTimer;
 @property(nonatomic, strong) CountlyWebViewController *presentingController;
 @property(nonatomic, strong) CountlyOverlayWindow *window;
+// Latched at creation; the manager is shared with feedback widgets, so content-only behaviour gates on it.
+@property(nonatomic) BOOL isFeedbackWidget;
 @end
 
 @implementation CountlyWebViewManager
-  #if (TARGET_OS_IOS)
+  #if (TARGET_OS_IOS || TARGET_OS_VISION)
 - (void)createWebViewWithURL:(NSURL *)url
                        frame:(CGRect)frame
                  appearBlock:(void(^ __nullable)(void))appearBlock
                 dismissBlock:(void(^ __nullable)(void))dismissBlock {
+    self.isFeedbackWidget = [self isFeedbackWidgetURL:url];
+    BOOL pinnedToPortrait = !self.isFeedbackWidget && CountlyContentBuilderInternal.sharedInstance.disableRotation;
     self.dismissBlock = dismissBlock;
     self.appearBlock = appearBlock;
     self.hasAppeared = NO;
     self.webViewClosed = NO;
     self.resourceRetryCount = 0;
     self.pendingReloadBlock = nil;
-    // TODO: keyWindow deprecation fix
     _window = [CountlyOverlayWindow new];
     CountlyWebViewController *modal = [CountlyWebViewController new];
     modal.modalPresentationStyle = UIModalPresentationOverFullScreen;
     modal.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     _window.rootViewController = modal;
-    UIViewController *rootViewController = UIApplication.sharedApplication.keyWindow.rootViewController;
+    // The rotation hook: UIKit always delivers it, unlike the device-orientation notification.
+    __weak typeof(self) weakSelf = self;
+    modal.sizeChangeHandler = ^(CGSize newSize) {
+        [weakSelf handleInterfaceSizeChange:newSize];
+    };
+    UIViewController *rootViewController = CountlyCommon.keyWindow.rootViewController;
     modal.modalPresentationCapturesStatusBarAppearance = YES;
     CGRect backgroundFrame = rootViewController.view.bounds;
     self.backgroundView = [[PassThroughBackgroundView alloc] initWithFrame:backgroundFrame];
     self.backgroundView.backgroundColor = [UIColor clearColor];
     self.backgroundView.hidden = YES;
+    self.backgroundView.reportPortraitSizeOnly = pinnedToPortrait;
     modal.contentView = self.backgroundView;
 
     _window.hidden = NO;
@@ -181,16 +190,49 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     // Arm the absolute content-shown deadline ONCE (not per navigation, so reloads cannot
     // extend it). If [CLY]_content_shown is not reported within kCLYContentShownDeadline, the
     // web view is closed regardless of retry/stall/verify state.
-    __weak typeof(self) weakSelf = self;
-    self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
-        [weakSelf contentShownDeadlineReached];
-    }];
+    // Only for CONTENT: feedback widgets (survey/NPS/rating) load a different SDK-built URL and
+    // never report [CLY]_content_shown, so arming the deadline for them would force-close a
+    // widget the user is still filling out. Skip it for feedback widget URLs.
+    if (!self.isFeedbackWidget) {
+        __weak typeof(self) deadlineSelf = self;
+        self.contentShownDeadlineTimer = [NSTimer scheduledTimerWithTimeInterval:kCLYContentShownDeadline repeats:NO block:^(NSTimer * _Nonnull timer) {
+            [deadlineSelf contentShownDeadlineReached];
+        }];
+    }
 
     CLYButton *dismissButton = [CLYButton dismissAlertButton:@"X"];
     [self configureDismissButton:dismissButton forWebView:webView];
 
     self.backgroundView.webView = webView;
+    self.backgroundView.baseWebViewFrame = frame;
     self.backgroundView.dismissButton = dismissButton;
+}
+
+// An interface size change (rotation, split view). The page is the authority on the new geometry.
+- (void)handleInterfaceSizeChange:(CGSize)newSize {
+    if (self.webViewClosed || !self.backgroundView.webView) {
+        return;
+    }
+
+    // Feedback widgets fill the window and have no resize channel of their own (widgetURLAction
+    // handles no commands), so they are re-placed natively. Measured the same way as at creation.
+    if (self.isFeedbackWidget) {
+        CGSize windowSize = [CountlyCommon.sharedInstance getWindowSize];
+        CGRect frame = CGRectMake(0.0, 0.0, windowSize.width, windowSize.height);
+        CLY_LOG_D(@"%s, re-placing feedback widget to [%@]", __FUNCTION__, NSStringFromCGRect(frame));
+        self.backgroundView.baseWebViewFrame = frame;
+        self.backgroundView.webView.frame = frame;
+        [self.presentingController updatePlacementRespectToSafeAreas];
+        [self.backgroundView updateWindowSize];
+        return;
+    }
+
+    // Prompted even when rotation is disabled: the page is told the portrait size either way (see
+    // reportPortraitSizeOnly), and re-asking is what corrects a page that laid out for the wrong
+    // orientation — e.g. content first shown while the device was already landscape.
+
+    CLY_LOG_D(@"%s, prompting the page for size [%@]", __FUNCTION__, NSStringFromCGSize(newSize));
+    [self.backgroundView updateWindowSize];
 }
 
 - (void)configureWebView:(WKWebView *)webView {
@@ -524,6 +566,20 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
     if (self.webViewClosed) return;
     CLY_LOG_I(@"%s [CLY]_content_shown not received within %.0fs; closing web view.", __FUNCTION__, kCLYContentShownDeadline);
     [self closeWebView];
+}
+
+// A feedback widget is presented through the same web view manager but loads a URL the SDK
+// builds in the feedback module as "<host>/feedback/<type>?...&widget_id=<id>&..." (see
+// CountlyFeedbackWidget generateWidgetURL), whereas content loads "<host>/_external/content?...".
+// Feedback widgets never report [CLY]_content_shown, so we must not arm the content-shown
+// deadline for them. Recognized by the SDK's own "/feedback/" endpoint path segment
+// (kCountlyEndpointFeedback), which content URLs never contain.
+- (BOOL)isFeedbackWidgetURL:(NSURL *)url {
+    if (!url) return NO;
+    NSString *path = url.path;
+    if (!path) return NO;
+    NSString *feedbackSegment = [kCountlyEndpointFeedback stringByAppendingString:@"/"];
+    return [path rangeOfString:feedbackSegment].location != NSNotFound;
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
@@ -873,31 +929,43 @@ static const NSTimeInterval kCLYContentShownDeadline = 60.0;
         return;
     }
 
-    // Determine the current orientation
-    UIInterfaceOrientation orientation = [UIApplication sharedApplication].statusBarOrientation;
-    BOOL isLandscape = UIInterfaceOrientationIsLandscape(orientation);
+    // Prefer the window the content is in over interfaceOrientation, which can disagree.
+    UIWindow *ownWindow = self.backgroundView.window;
+    BOOL isLandscape;
+    if (ownWindow && !CGRectIsEmpty(ownWindow.bounds)) {
+        isLandscape = ownWindow.bounds.size.width > ownWindow.bounds.size.height;
+    } else {
+        isLandscape = UIInterfaceOrientationIsLandscape([CountlyCommon.sharedInstance interfaceOrientation]);
+    }
+
+    // Content pinned to portrait must stay portrait even if the page asks for landscape.
+    if (!self.isFeedbackWidget && CountlyContentBuilderInternal.sharedInstance.disableRotation) {
+        isLandscape = NO;
+    }
 
     // Select the appropriate dimensions based on orientation
     NSDictionary *dimensions = isLandscape ? landscapeDimensions : portraitDimensions;
+    if (!dimensions) {
+        dimensions = isLandscape ? portraitDimensions : landscapeDimensions;
+    }
 
-    // Get the dimension values
-    CGFloat x = [dimensions[@"x"] floatValue];
-    CGFloat y = [dimensions[@"y"] floatValue];
-    CGFloat width = [dimensions[@"w"] floatValue];
-    CGFloat height = [dimensions[@"h"] floatValue];
+    CGRect base = [self rectFromDimensions:dimensions];
 
     // Animate the resizing of the web view
     [UIView animateWithDuration:0.3 animations:^{
-        CGRect frame = self.backgroundView.webView.frame;
-        frame.origin.x = x;
-        frame.origin.y = y;
-        frame.size.width = width;
-        frame.size.height = height;
-        self.backgroundView.webView.frame = frame;
+        self.backgroundView.baseWebViewFrame = base;
+        self.backgroundView.webView.frame = base;
         [self.presentingController updatePlacementRespectToSafeAreas];
     } completion:^(BOOL finished) {
-        CLY_LOG_I(@"%s, Resized web view to width: %f, height: %f", __FUNCTION__, width, height);
+        CLY_LOG_I(@"%s, Resized web view to width: %f, height: %f", __FUNCTION__, base.size.width, base.size.height);
     }];
+}
+
+- (CGRect)rectFromDimensions:(NSDictionary *)dimensions {
+    return CGRectMake([dimensions[@"x"] floatValue],
+                      [dimensions[@"y"] floatValue],
+                      [dimensions[@"w"] floatValue],
+                      [dimensions[@"h"] floatValue]);
 }
 
 - (void)closeWebView
